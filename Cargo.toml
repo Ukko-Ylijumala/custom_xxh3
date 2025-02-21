@@ -1,0 +1,22 @@
+[package]
+name = "custom_xxh3"
+version = "0.3.0"
+authors = ["Mikko Tanner <mikko.tanner@gmail.com>"]
+description = "Customized xxh3 hasher and hash builder"
+readme = "README.md"
+repository = "https://github.com/Ukko-Ylijumala/custom_xxh3"
+license = "MIT OR Apache-2.0"
+categories = ["algorithms"]
+keywords = ["hashing", "hash", "xxhash", "xxh3"]
+publish = false
+edition = "2021"
+
+[features]
+size_of = ["dep:size-of"]
+
+[dependencies]
+size-of = { version = "0.1", optional = true }
+
+[dependencies.xxhash-rust]
+version = "0.8"
+features = ["xxh3", "const_xxh3"]
