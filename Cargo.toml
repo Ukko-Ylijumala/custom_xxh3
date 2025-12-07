@@ -14,8 +14,13 @@ edition = "2021"
 [features]
 size_of = ["dep:size-of"]
 
-[dependencies]
-size-of = { version = "0.1", optional = true }
+#[dependencies]
+#size-of = { version = "0.1", optional = true }
+
+[dependencies.size-of]
+git = "https://github.com/Ukko-Ylijumala/size-of"
+version = "0.1.7"
+optional = true
 
 [dependencies.xxhash-rust]
 version = "0.8"
