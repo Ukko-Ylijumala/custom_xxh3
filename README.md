@@ -144,7 +144,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Version History
 
-- Unreleased
+- 0.3.1: Faster hashing of small items
     - `QuickXxh3Hasher` for short inputs, used by `hash_item()`: ~6x faster for small items, same hashes
 - 0.3.0: Initial library version
     - Basic XXH3 implementation
