@@ -20,6 +20,12 @@ use {
 const XXH3_SECRET_SIZE: usize = 192;
 const XXH3_SECRET_SEED: u64 = 0xDEAD_BEEF_FEED_F00D;
 const XXH3_SECRET: [u8; XXH3_SECRET_SIZE] = const_custom_default_secret(XXH3_SECRET_SEED);
+/**
+Input size up to which [QuickXxh3Hasher] hashes in one go. Its buffer is
+zeroed for every hasher, so a larger one costs extra time even for short
+inputs: ~3 ns per `u64` with 64 bytes vs ~4 ns with 128.
+*/
+const QUICK_BUF_SIZE: usize = 64;
 
 #[derive(Debug)]
 pub enum Xxh3Error {
@@ -247,11 +253,94 @@ impl SizeOf for CustomXxh3Hasher {
 /* --------------------------------- */
 
 /**
+A [Hasher] for hashing one short item at a time, e.g. a digest per element
+of a collection. Setting up a streaming [Xxh3] (as in [CustomXxh3Hasher])
+costs far more than hashing a few bytes, so this hasher collects the input
+in a buffer and hashes it in one go with [hash_bytes]: ~3 ns for a `u64`,
+where setting up a [CustomXxh3Hasher] takes ~18 ns. Inputs longer than 64
+bytes spill over into a [CustomXxh3Hasher].
+
+For the same input, the hash is identical to that of the default
+[CustomXxh3Hasher], as the one-shot and streaming forms of xxh3 agree.
+*/
+#[derive(Clone)]
+pub struct QuickXxh3Hasher {
+    buf: [u8; QUICK_BUF_SIZE],
+    len: usize,
+    /// Set once the input no longer fits in `buf`.
+    spill: Option<Box<CustomXxh3Hasher>>,
+}
+
+impl QuickXxh3Hasher {
+    /// Move the input so far over to a streaming hasher, and continue there.
+    #[cold]
+    fn spill(&mut self, bytes: &[u8]) {
+        let mut hasher: Box<CustomXxh3Hasher> = Box::default();
+        hasher.write(&self.buf[..self.len]);
+        hasher.write(bytes);
+        self.spill = Some(hasher);
+    }
+}
+
+impl Default for QuickXxh3Hasher {
+    fn default() -> Self {
+        Self {
+            buf: [0; QUICK_BUF_SIZE],
+            len: 0,
+            spill: None,
+        }
+    }
+}
+
+impl Hasher for QuickXxh3Hasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let end: usize = self.len + bytes.len();
+        if let Some(hasher) = &mut self.spill {
+            hasher.write(bytes);
+        } else if end <= QUICK_BUF_SIZE {
+            self.buf[self.len..end].copy_from_slice(bytes);
+            self.len = end;
+        } else {
+            self.spill(bytes);
+        }
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        match &self.spill {
+            Some(hasher) => hasher.finish(),
+            None => hash_bytes(&self.buf[..self.len]),
+        }
+    }
+}
+
+impl Debug for QuickXxh3Hasher {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "QuickXxh3Hasher(hash: {})", self.finish())
+    }
+}
+
+#[cfg(feature = "size_of")]
+impl SizeOf for QuickXxh3Hasher {
+    fn size_of_children(&self, context: &mut Context) {
+        if self.spill.is_some() {
+            context
+                .add(size_of::<CustomXxh3Hasher>())
+                .add_distinct_allocation();
+        }
+    }
+}
+
+/* --------------------------------- */
+
+/**
 A trait for types which can hash themselves using the [Xxh3] algorithm.
 
 A recommended way to implement this trait is to use the [CustomXxh3Hasher]
-internally for more complex types, and [hash_bytes] for simple types which
-can be represented as byte slices.
+(or for short inputs, the faster [QuickXxh3Hasher]) internally for more
+complex types, and [hash_bytes] for simple types which can be represented
+as byte slices.
 */
 pub trait Xxh3Hashable {
     /// Calculates the xxHash3 value for this item using the provided hasher.
@@ -345,20 +434,21 @@ pub fn hash_bytes_default(bytes: &[u8]) -> u64 {
 }
 
 /**
-A quick and dirty function to hash an item using [Xxh3] as the hasher.
-The item in question must implement the [Hash] trait, obviously.
+A function to hash an item using [Xxh3] as the hasher. The item in
+question must implement the [Hash] trait, obviously.
 
-NOTE: This function is not meant for high-performance use cases. It creates
-a new `Xxh3` for each call, which is not terribly efficient. Prefer building
-a single `Xxh3` instance with [CustomXxh3Hasher] for multiple hash calls, or
-use [hash_bytes] if the item can be represented as a byte slice.
+The result is the same as with a default [CustomXxh3Hasher], but as this
+uses a [QuickXxh3Hasher], short items (up to 64 bytes of input) are
+hashed without setting up a streaming `Xxh3` for each call.
+If the item can be represented as a byte slice, [hash_bytes] is still the
+most direct way.
 */
 #[inline]
 pub fn hash_item<T>(item: &T) -> u64
 where
     T: Hash,
 {
-    let mut hasher: CustomXxh3Hasher = CustomXxh3Hasher::default();
+    let mut hasher: QuickXxh3Hasher = QuickXxh3Hasher::default();
     item.hash(&mut hasher);
     hasher.finish()
 }
@@ -408,6 +498,43 @@ mod tests {
             hasher2.finish(),
             "Custom XXH3 hashes should match"
         );
+    }
+
+    #[test]
+    fn test_quick_hasher_matches_streaming() {
+        let data: Vec<u8> = (0..3 * QUICK_BUF_SIZE)
+            .map(|i: usize| (i * 7 + 3) as u8)
+            .collect();
+        for len in 0..data.len() {
+            let input: &[u8] = &data[..len];
+            let mut streaming: CustomXxh3Hasher = CustomXxh3Hasher::default();
+            streaming.write(input);
+            let expected: u64 = streaming.finish();
+
+            let mut quick: QuickXxh3Hasher = QuickXxh3Hasher::default();
+            quick.write(input);
+            assert_eq!(quick.finish(), expected, "one write of {len} bytes");
+
+            // several writes, crossing the buffer size at different points
+            let mut quick: QuickXxh3Hasher = QuickXxh3Hasher::default();
+            input.chunks(13).for_each(|chunk: &[u8]| quick.write(chunk));
+            assert_eq!(
+                quick.finish(),
+                expected,
+                "writes of 13 bytes, {len} in total"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hash_item() {
+        let items: [&str; 3] = ["", "short", &"long ".repeat(QUICK_BUF_SIZE)];
+        for item in items {
+            let mut hasher: CustomXxh3Hasher = CustomXxh3Hasher::default();
+            item.hash(&mut hasher);
+            assert_eq!(hash_item(&item), hasher.finish(), "{} bytes", item.len());
+        }
+        assert_eq!(hash_item(&42u64), hash_bytes(&42u64.to_ne_bytes()), "u64");
     }
 
     #[test]
