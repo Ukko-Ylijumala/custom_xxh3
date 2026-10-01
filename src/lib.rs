@@ -43,8 +43,8 @@ hashes in a single pass, as it processes longer inputs in stripes. The
 buffer is left uninitialized, so its size costs nothing up front.
 */
 const QUICK_BUF_SIZE: usize = 240;
-/// Input size up to which [QuickXxh3Hasher] keeps the input in a register.
-const QUICK_SMALL_SIZE: usize = 16;
+/// Input size up to which [QuickXxh3Hasher] keeps the input in registers.
+const QUICK_SMALL_SIZE: usize = 32;
 /// Xxh3's own default secret, used with a seed.
 const XXH3_DEFAULT_SECRET: [u8; XXH3_SECRET_SIZE] = const_custom_default_secret(0);
 
@@ -347,8 +347,8 @@ for hashing one item at a time, e.g. a `HashMap` key or a digest per element
 of a collection. Setting up a streaming [Xxh3] (as in [CustomXxh3Hasher])
 costs far more than hashing a few bytes, so this hasher collects the input
 and hashes it in one go: ~1 ns for a `u64`, where setting up a
-[CustomXxh3Hasher] takes ~15 ns. Up to 16 bytes, e.g. a short string or a
-few integer fields, it collects them in a register, and up to 240 in a
+[CustomXxh3Hasher] takes ~15 ns. Up to 32 bytes, e.g. a short string or a
+few integer fields, it collects them in registers, and up to 240 in a
 buffer, hashed with [hash_bytes]. Longer inputs, which xxh3 can't hash in
 one pass anyway, spill over into a [CustomXxh3Hasher].
 
@@ -361,13 +361,15 @@ so that the unused one costs nothing, not even a branch.
 #[derive(Clone)]
 pub struct QuickXxh3Hasher<const SEEDED: bool = false> {
     /**
-    The input so far, little-endian, while it is at most 16 bytes long. It
-    is hashed from this register as is: hashing it from `buf` right after
-    writing it there makes the CPU wait for the writes to land in memory,
-    as xxh3's reads straddle them (store-to-load forwarding fails).
+    The input so far, little-endian, while it is at most 32 bytes long:
+    bytes 0-15 in `small`, 16-31 in `small_hi`. It is hashed from these
+    registers as is: hashing it from `buf` right after writing it there makes
+    the CPU wait for the writes to land in memory, as xxh3's reads straddle
+    them (store-to-load forwarding fails).
     */
     small: u128,
-    /// The input so far once longer than 16 bytes, when `buf[..len]` is initialized.
+    small_hi: u128,
+    /// The input so far once longer than 32 bytes, when `buf[..len]` is initialized.
     buf: [MaybeUninit<u8>; QUICK_BUF_SIZE],
     len: usize,
     /// Only used with `SEEDED`.
@@ -405,6 +407,7 @@ impl<const SEEDED: bool> QuickXxh3Hasher<SEEDED> {
         // SAFETY: every field but buf is written, and buf may be uninitialized
         unsafe {
             (&raw mut (*ptr).small).write(0);
+            (&raw mut (*ptr).small_hi).write(0);
             (&raw mut (*ptr).len).write(0);
             (&raw mut (*ptr).seed).write(seed);
             (&raw mut (*ptr).spill).write(None);
@@ -412,17 +415,50 @@ impl<const SEEDED: bool> QuickXxh3Hasher<SEEDED> {
         }
     }
 
-    /// The input written so far, once longer than 16 bytes and as long as it fits in `buf`.
+    /// The input written so far, once longer than 32 bytes and as long as it fits in `buf`.
     #[inline]
     fn buffered(&self) -> &[u8] {
         // SAFETY: write() initializes buf[..len] before extending len over it
         unsafe { self.buf[..self.len].assume_init_ref() }
     }
 
-    /// Move the input so far from `small` over to `buf`, as it grows past 16 bytes.
+    /// The bytes in `small` and `small_hi`, of which the first `len` are the input.
+    #[inline]
+    fn small_bytes(&self) -> [u8; QUICK_SMALL_SIZE] {
+        let mut bytes: [u8; QUICK_SMALL_SIZE] = [0; QUICK_SMALL_SIZE];
+        bytes[..16].copy_from_slice(&self.small.to_le_bytes());
+        bytes[16..].copy_from_slice(&self.small_hi.to_le_bytes());
+        bytes
+    }
+
+    /// Move the input so far from `small` and `small_hi` over to `buf`, as it grows past 32 bytes.
     #[inline]
     fn small_to_buf(&mut self) {
-        self.buf[..QUICK_SMALL_SIZE].write_copy_of_slice(&self.small.to_le_bytes());
+        let bytes: [u8; QUICK_SMALL_SIZE] = self.small_bytes();
+        self.buf[..QUICK_SMALL_SIZE].write_copy_of_slice(&bytes);
+    }
+
+    /// Write `bytes` as the input grows past 16 bytes: to `small_hi` up to 32, then on to `buf`.
+    #[inline]
+    fn write_long(&mut self, bytes: &[u8]) {
+        let end: usize = self.len + bytes.len();
+        if let Some(hasher) = &mut self.spill {
+            hasher.write(bytes);
+        } else if end <= QUICK_SMALL_SIZE {
+            let (lo, hi): (u128, u128) = read_small32(bytes);
+            let (lo, hi): (u128, u128) = shl256(lo, hi, self.len * 8);
+            self.small |= lo;
+            self.small_hi |= hi;
+            self.len = end;
+        } else if end <= QUICK_BUF_SIZE {
+            if self.len > 0 && self.len <= QUICK_SMALL_SIZE {
+                self.small_to_buf();
+            }
+            self.buf[self.len..end].write_copy_of_slice(bytes);
+            self.len = end;
+        } else {
+            self.spill(bytes);
+        }
     }
 
     /// Move the input so far over to a streaming hasher, and continue there.
@@ -433,7 +469,7 @@ impl<const SEEDED: bool> QuickXxh3Hasher<SEEDED> {
             false => CustomXxh3Hasher::default(),
         });
         match self.len <= QUICK_SMALL_SIZE {
-            true => hasher.write(&self.small.to_le_bytes()[..self.len]),
+            true => hasher.write(&self.small_bytes()[..self.len]),
             false => hasher.write(self.buffered()),
         }
         hasher.write(bytes);
@@ -450,25 +486,38 @@ impl Default for QuickXxh3Hasher {
 }
 
 impl<const SEEDED: bool> Hasher for QuickXxh3Hasher<SEEDED> {
-    #[inline]
+    /**
+    Always inlined, as is `finish()`, for the input to stay in registers,
+    but only for up to 16 bytes, the rest being in `write_long()`: more
+    inlined code slows down the shorter inputs (see the README's notes on
+    hashing short inputs).
+    */
+    #[inline(always)]
     fn write(&mut self, bytes: &[u8]) {
         let end: usize = self.len + bytes.len();
-        if let Some(hasher) = &mut self.spill {
-            hasher.write(bytes);
-        } else if end <= QUICK_SMALL_SIZE {
+        if end <= 16 && self.spill.is_none() {
             // bytes are only empty if len may be 16, too far to shift by
             if !bytes.is_empty() {
                 self.small |= read_small(bytes) << (self.len * 8);
             }
             self.len = end;
-        } else if end <= QUICK_BUF_SIZE {
-            if self.len > 0 && self.len <= QUICK_SMALL_SIZE {
-                self.small_to_buf();
-            }
-            self.buf[self.len..end].write_copy_of_slice(bytes);
-            self.len = end;
         } else {
-            self.spill(bytes);
+            self.write_long(bytes);
+        }
+    }
+
+    /// A single byte, e.g. the 0xff that ends a str, is quick to append in the registers,
+    /// sparing a str of 16-31 bytes a call to `write_long()`.
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        if self.len < QUICK_SMALL_SIZE && self.spill.is_none() {
+            match self.len < 16 {
+                true => self.small |= (i as u128) << (self.len * 8),
+                false => self.small_hi |= (i as u128) << ((self.len - 16) * 8),
+            }
+            self.len += 1;
+        } else {
+            self.write(&[i]);
         }
     }
 
@@ -481,10 +530,14 @@ impl<const SEEDED: bool> Hasher for QuickXxh3Hasher<SEEDED> {
     fn finish(&self) -> u64 {
         match &self.spill {
             Some(hasher) => hasher.finish(),
-            None if self.len <= QUICK_SMALL_SIZE => match SEEDED {
-                true => xxh3_small(self.small, self.len, self.seed, &XXH3_DEFAULT_SECRET),
-                false => xxh3_small(self.small, self.len, 0, &XXH3_SECRET),
-            },
+            None if self.len <= QUICK_SMALL_SIZE => {
+                let (small, small_hi, len): (u128, u128, usize) =
+                    (self.small, self.small_hi, self.len);
+                match SEEDED {
+                    true => xxh3_small(small, small_hi, len, self.seed, &XXH3_DEFAULT_SECRET),
+                    false => xxh3_small(small, small_hi, len, 0, &XXH3_SECRET),
+                }
+            }
             None if SEEDED => xxh3_64_with_seed(self.buffered(), self.seed),
             None => hash_bytes(self.buffered()),
         }
@@ -516,6 +569,12 @@ fn le_u64(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
 }
 
+/// The little-endian `u128` at `at` in `bytes`.
+#[inline(always)]
+fn le_u128(bytes: &[u8], at: usize) -> u128 {
+    u128::from_le_bytes(bytes[at..at + 16].try_into().unwrap())
+}
+
 /// The little-endian `u32` at `at` in `bytes`, as a `u64`.
 #[inline(always)]
 fn le_u32(bytes: &[u8], at: usize) -> u64 {
@@ -539,25 +598,66 @@ fn read_small(bytes: &[u8]) -> u128 {
     }
 }
 
+/// Read `bytes`, at most 32 of them, into little-endian `u128`s of bytes 0-15 and 16-31.
+#[inline(always)]
+fn read_small32(bytes: &[u8]) -> (u128, u128) {
+    match bytes.len() {
+        0..=16 => (read_small(bytes), 0),
+        _ => (le_u128(bytes, 0), read_small(&bytes[16..])),
+    }
+}
+
+/// Shift the 256-bit `(lo, hi)` left by `shift` bits, less than 256, with `hi` 0 for 128 or more.
+#[inline(always)]
+fn shl256(lo: u128, hi: u128, shift: usize) -> (u128, u128) {
+    match shift {
+        0 => (lo, hi),
+        1..128 => (lo << shift, hi << shift | lo >> (128 - shift)),
+        _ => (0, lo << (shift - 128)),
+    }
+}
+
 /**
-xxh3 of the `len` bytes (at most 16) in `small`, computed as xxhash-rust's
-`xxh3_64_0to16()` does from a slice. `seed` and `secret` are as there: 0
-with a custom secret, or a seed with Xxh3's default secret.
+xxh3 of the `len` bytes (at most 32) in `small` and `small_hi`, computed as
+xxhash-rust's `xxh3_64_0to16()` and `xxh3_64_7to128()` do from a slice.
+`seed` and `secret` are as there: 0 with a custom secret, or a seed with
+Xxh3's default secret.
 */
 #[inline(always)]
-fn xxh3_small(small: u128, len: usize, seed: u64, secret: &[u8; XXH3_SECRET_SIZE]) -> u64 {
+fn xxh3_small(
+    small: u128,
+    small_hi: u128,
+    len: usize,
+    seed: u64,
+    secret: &[u8; XXH3_SECRET_SIZE],
+) -> u64 {
     let input32 = |at: usize| -> u64 { (small >> (at * 8)) as u32 as u64 };
     let input64 = |at: usize| -> u64 { (small >> (at * 8)) as u64 };
     let secret32 = |at: usize| -> u64 { le_u32(secret, at) };
     let secret64 = |at: usize| -> u64 { le_u64(secret, at) };
-    if len > 8 {
+    if len > 16 {
+        // the first and the last 16 bytes, mixed with the first 32 of the secret
+        let last: u128 = match (len - 16) * 8 {
+            128 => small_hi,
+            shift => small >> shift | small_hi << (128 - shift),
+        };
+        let mix16 = |input: u128, at: usize| -> u64 {
+            let lo: u64 = input as u64 ^ secret64(at).wrapping_add(seed);
+            let hi: u64 = (input >> 64) as u64 ^ secret64(at + 8).wrapping_sub(seed);
+            mul128_fold64(lo, hi)
+        };
+        let acc: u64 = (len as u64)
+            .wrapping_mul(0x9E37_79B1_85EB_CA87)
+            .wrapping_add(mix16(small, 0))
+            .wrapping_add(mix16(last, 16));
+        xxh3_avalanche(acc)
+    } else if len > 8 {
         let lo: u64 = input64(0) ^ (secret64(24) ^ secret64(32)).wrapping_add(seed);
         let hi: u64 = input64(len - 8) ^ (secret64(40) ^ secret64(48)).wrapping_sub(seed);
-        let product: u128 = lo as u128 * hi as u128;
         let acc: u64 = (len as u64)
             .wrapping_add(lo.swap_bytes())
             .wrapping_add(hi)
-            .wrapping_add(product as u64 ^ (product >> 64) as u64);
+            .wrapping_add(mul128_fold64(lo, hi));
         xxh3_avalanche(acc)
     } else if len >= 4 {
         let seed: u64 = seed ^ ((seed as u32).swap_bytes() as u64) << 32;
@@ -571,6 +671,13 @@ fn xxh3_small(small: u128, len: usize, seed: u64, secret: &[u8; XXH3_SECRET_SIZE
     } else {
         xxh64_avalanche(seed ^ secret64(56) ^ secret64(64))
     }
+}
+
+/// The 128-bit product of `lo` and `hi`, its halves xor'ed together.
+#[inline(always)]
+fn mul128_fold64(lo: u64, hi: u64) -> u64 {
+    let product: u128 = lo as u128 * hi as u128;
+    product as u64 ^ (product >> 64) as u64
 }
 
 #[inline(always)]
@@ -810,8 +917,8 @@ mod tests {
 
     const TEST_DATA: &[u8] = b"Hello, world!";
     const TEST_SECRET: [u8; XXH3_SECRET_SIZE] = const_custom_default_secret(1);
-    /// Input lengths covering each of xxh3's size tiers.
-    const TEST_LENGTHS: [usize; 9] = [0, 3, 8, 16, 100, 200, 240, 241, 1000];
+    /// Input lengths covering each of xxh3's size tiers and QuickXxh3Hasher's registers.
+    const TEST_LENGTHS: [usize; 14] = [0, 3, 8, 16, 17, 25, 31, 32, 33, 100, 200, 240, 241, 1000];
 
     /**
     Hashes of `test_input(len)` by the reference C implementation of xxh3
@@ -821,11 +928,16 @@ mod tests {
     [seeded_secret]).
     */
     #[rustfmt::skip]
-    const KNOWN_HASHES: [(usize, [u64; 5]); 9] = [
+    const KNOWN_HASHES: [(usize, [u64; 5]); 14] = [
         (0,    [0x80822ed4294443e6, 0x2d06800538d394c2, 0xb029411ff43d84d2, 0x63b572f6de50a057, 0x5580fbcd07d0887a]),
         (3,    [0x95831261638fd6b6, 0xa9088dda485b481c, 0x3a6eb7a191052c81, 0x962ee7d551766d62, 0x6b010b97f3e3a63b]),
         (8,    [0xc5aac67c7fb41165, 0x60539db630471163, 0x53a895ca319fab31, 0x1f6e9fdca1201186, 0x89d1787ae5f84d83]),
         (16,   [0xf58d560ef36dc2be, 0xb8c859b0f030b585, 0x6b1b54f65d114c69, 0x5e0054478767b7ec, 0x3a51e136ad54394d]),
+        (17,   [0x8632c46eb570e159, 0x714a04408e79b80f, 0x148ada809b3845dd, 0x92506c214b19ed1b, 0x5b55ac4918aea4de]),
+        (25,   [0x66002123972aab00, 0x0e7268538eb5e5a3, 0xceb9fefa3dc148b2, 0xb5e153ab4c5c736f, 0xbc1a64d6aaeb522d]),
+        (31,   [0xe327be4e8ce3feff, 0xed41ac283d0674b3, 0xa4d64e9fc325c61d, 0xfbd59fe858b382b0, 0x3cf9876d696350fc]),
+        (32,   [0x78e77d1ae1b0b7fc, 0x19ff4ee1d6ba1a55, 0xdc188514409a9166, 0x5b44bf66a382bea6, 0x1686aeabb8ac70b0]),
+        (33,   [0x507516a7b7d43a8b, 0x3e44983ad21679c8, 0x9f3df11bfff1c982, 0xfd1c8b264247be96, 0xacb792537a63d81c]),
         (100,  [0xcf601930ae62ddc5, 0xb5937857f0d78c9f, 0x223ce4409957d0ce, 0x8d31013832bcb124, 0x6d498d361ad18589]),
         (200,  [0x4cabd59b24723b7d, 0x746cd0025327bf5b, 0xb04cc37ae5a4a48d, 0x63a59acfaaa20856, 0xa65863891e5c72c6]),
         (240,  [0x3c49c036e345306f, 0x64556dc6b462a6cf, 0x722964f8a7f16de3, 0xe1b013642eaa19d6, 0x66cdc2a808362c40]),
@@ -1142,6 +1254,15 @@ mod tests {
                     "seeded: {SEEDED}, writes of {size} bytes, {len} in total"
                 );
             }
+
+            // byte by byte with write_u8(), as e.g. the 0xff that ends a str goes
+            let mut quick: QuickXxh3Hasher<SEEDED> = new_quick();
+            input.iter().for_each(|byte: &u8| quick.write_u8(*byte));
+            assert_eq!(
+                quick.finish(),
+                expected,
+                "seeded: {SEEDED}, write_u8() of {len} bytes"
+            );
         }
     }
 

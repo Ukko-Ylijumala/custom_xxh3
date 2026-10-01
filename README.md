@@ -172,19 +172,21 @@ let hash2 = hasher.finish();
 
 The XXH3 algorithm is designed for high performance, particularly when dealing with large amounts of data. This implementation maintains those performance characteristics while adding useful features like state management and batch processing.
 
-Hashing one value per hasher with `Hash`, as `HashMap` keys or a digest per item do (ns per value, on one
-x86-64 machine):
+Hashing one value per hasher with `Hash`, as `HashMap` keys or a digest per item do (ns per value, on an
+AMD Zen 3 machine; see the notes on hashing short inputs below):
 
 | Value                      | `DefaultHasher` | `QuickXxh3Hasher` | `CustomXxh3Hasher` |
 |----------------------------|----------------:|------------------:|-------------------:|
-| `u64`                      |             4.6 |               1.2 |               14.4 |
-| `(u32, u16)`               |             4.1 |               1.5 |               24.7 |
+| `u64`                      |             4.8 |               1.2 |               14.2 |
+| `(u32, u16)`               |             4.0 |               1.5 |               24.6 |
+| `(u64, u64, u32)`          |             5.5 |               2.0 |               25.1 |
 | `String`, 5-15 chars       |             6.3 |               4.8 |               23.8 |
-| `String`, 16-50 chars      |             9.4 |              11.0 |               24.2 |
-| `String`, 60-150 chars     |            24.6 |              15.0 |               28.3 |
-| `(String 5-15, u64)`       |            10.4 |              10.6 |               26.1 |
-| `String`, 1 KiB            |           150.0 |              79.4 |               68.8 |
-| `String`, 1 MiB            |          147 µs |             34 µs |              34 µs |
+| `String`, 16-31 chars      |             8.1 |               7.9 |               23.6 |
+| `String`, 32-50 chars      |            10.6 |              11.9 |               23.9 |
+| `String`, 60-150 chars     |            25.9 |              15.5 |               28.3 |
+| `(String 5-15, u64)`       |            10.4 |               7.5 |               26.1 |
+| `String`, 1 KiB            |           174.7 |              81.6 |               68.3 |
+| `String`, 1 MiB            |          174 µs |             33 µs |              33 µs |
 
 ## Optional Features
 
