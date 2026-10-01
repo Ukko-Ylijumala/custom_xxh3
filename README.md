@@ -318,6 +318,11 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Version History
 
+- 0.4.4: Faster hashing of 17-32 byte inputs, and benchmarks
+    - `QuickXxh3Hasher` keeps inputs of up to 32 bytes in registers (was 16): ~4x faster for values of 17-32 bytes,
+      e.g. a few integer fields, ~25% for strings of 16-31 chars, same hashes. Strings past 32 chars ~3-10% slower
+    - Notes in the README on the approaches tried for hashing short inputs, and why most did not work
+    - Criterion benchmarks behind the README's timings: `cargo bench`
 - 0.4.3: Drop-in replacement for std's hashing
     - `new()` builds the default hasher, as `DefaultHasher::new()` does. **API change:** the seeded constructors are
       now `with_seed(seed)`, on `CustomXxh3Hasher` and `QuickXxh3Hasher`
