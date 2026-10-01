@@ -215,11 +215,13 @@ impl CustomXxh3Hasher {
         self.write_u64(other);
     }
 
-    /// Hash multiple items efficiently
+    /**
+    Hash multiple items efficiently, continuing from the current state, and
+    return the digest. The items go in with [Hash::hash_slice], which feeds
+    e.g. a slice of integers to the hasher as one write of all its bytes.
+    */
     pub fn hash_batch<T: Hash>(&mut self, items: &[T]) -> u64 {
-        for item in items {
-            item.hash(self);
-        }
+        T::hash_slice(items, self);
         self.finish()
     }
 }
@@ -796,6 +798,22 @@ mod tests {
         let mut expected: CustomXxh3Hasher = CustomXxh3Hasher::new(builder.seed);
         TEST_DATA.hash(&mut expected);
         assert_eq!(builder.hash_one(TEST_DATA), expected.finish());
+    }
+
+    /// Check that hash_batch() hashes as hashing the items one by one.
+    fn check_hash_batch<T: Hash>(items: &[T]) {
+        let mut expected: CustomXxh3Hasher = CustomXxh3Hasher::default();
+        items.iter().for_each(|item: &T| item.hash(&mut expected));
+        let mut hasher: CustomXxh3Hasher = CustomXxh3Hasher::default();
+        assert_eq!(hasher.hash_batch(items), expected.finish());
+    }
+
+    #[test]
+    fn test_hash_batch_matches_items() {
+        check_hash_batch(&test_input(1000));
+        check_hash_batch(&(0..1000u64).collect::<Vec<u64>>());
+        check_hash_batch(&[(1u32, 'a'), (2, 'b')]);
+        check_hash_batch(&["", "short", "long ".repeat(100).as_str()]);
     }
 
     #[test]
