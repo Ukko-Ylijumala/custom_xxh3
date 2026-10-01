@@ -64,6 +64,22 @@ hasher.write(b"Hello, world!");
 let hash = hasher.finish();
 ```
 
+### HashMaps
+
+`QuickXxh3Builder` builds a `QuickXxh3Hasher` per map operation, with stable hashes, while
+`RandomXxh3Builder` does the same with a random seed per builder. Both beat std's `RandomState`,
+by ~2-2.5x for `u64` keys and ~1.1-1.5x for string keys in benchmarks.
+
+```rust
+use custom_xxh3::{QuickXxh3Builder, RandomXxh3Builder};
+use std::collections::HashMap;
+
+let mut stable: HashMap<&str, u32, QuickXxh3Builder> = HashMap::default();
+stable.insert("key", 1);
+let mut random: HashMap<&str, u32, RandomXxh3Builder> = HashMap::default();
+random.insert("key", 1);
+```
+
 ### Batch Processing
 
 ```rust

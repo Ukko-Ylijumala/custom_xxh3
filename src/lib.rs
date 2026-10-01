@@ -4,7 +4,7 @@
 use std::{
     error::Error,
     fmt::{self, Debug, Display, Formatter},
-    hash::{BuildHasher, Hash, Hasher, RandomState},
+    hash::{BuildHasher, BuildHasherDefault, Hash, Hasher, RandomState},
     mem::MaybeUninit,
     ops::{Deref, DerefMut},
 };
@@ -432,6 +432,13 @@ impl<const SEEDED: bool> SizeOf for QuickXxh3Hasher<SEEDED> {
     }
 }
 
+/**
+A [BuildHasher] for `HashMap` and friends, building a [QuickXxh3Hasher]
+per operation. The hashes are stable, the same as those of the default
+[CustomXxh3Hasher]; for randomized ones, see [RandomXxh3Builder].
+*/
+pub type QuickXxh3Builder = BuildHasherDefault<QuickXxh3Hasher>;
+
 /* --------------------------------- */
 
 /**
@@ -789,6 +796,17 @@ mod tests {
         let mut expected: CustomXxh3Hasher = CustomXxh3Hasher::new(builder.seed);
         TEST_DATA.hash(&mut expected);
         assert_eq!(builder.hash_one(TEST_DATA), expected.finish());
+    }
+
+    #[test]
+    fn test_quick_builder_matches_default() {
+        let builder: QuickXxh3Builder = QuickXxh3Builder::default();
+        for len in TEST_LENGTHS {
+            let input: Vec<u8> = test_input(len);
+            let mut expected: CustomXxh3Hasher = CustomXxh3Hasher::default();
+            input.hash(&mut expected);
+            assert_eq!(builder.hash_one(&input), expected.finish(), "{len} bytes");
+        }
     }
 
     #[test]
