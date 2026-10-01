@@ -497,23 +497,37 @@ impl<T: Xxh3Hashable> Hash for Xxh3Wrapper<T> {
 
 /* --------------------------------- */
 
-/// Add randomized state initialization similar to SipHash
-#[derive(Clone, Debug)]
-pub struct RandomXxh3Builder(RandomState);
+/**
+Add randomized state initialization similar to SipHash: each builder draws
+a random seed once, and builds [QuickXxh3Hasher]s hashing as
+[CustomXxh3Hasher::new] with that seed.
+*/
+#[derive(Clone)]
+pub struct RandomXxh3Builder {
+    seed: u64,
+}
 
 impl RandomXxh3Builder {
     pub fn new() -> Self {
-        Self(RandomState::new())
-    }
-
-    pub fn build_hasher(&self) -> CustomXxh3Hasher {
-        // Use the RandomState to generate a seed
-        let seed = {
-            let mut hasher = self.0.build_hasher();
+        // Use a RandomState to generate a seed
+        let seed: u64 = {
+            let mut hasher = RandomState::new().build_hasher();
             hasher.write(&[0; 64]); // Some input to hash
             hasher.finish()
         };
-        CustomXxh3Hasher::new(seed)
+        Self { seed }
+    }
+
+    #[inline]
+    pub fn build_hasher(&self) -> QuickXxh3Hasher<true> {
+        QuickXxh3Hasher::new(self.seed)
+    }
+}
+
+impl Debug for RandomXxh3Builder {
+    /// Leaves the seed out, as [RandomState] does with its keys.
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RandomXxh3Builder").finish_non_exhaustive()
     }
 }
 
@@ -525,8 +539,9 @@ impl Default for RandomXxh3Builder {
 
 // Allow using this as a BuildHasher for HashMap
 impl BuildHasher for RandomXxh3Builder {
-    type Hasher = CustomXxh3Hasher;
+    type Hasher = QuickXxh3Hasher<true>;
 
+    #[inline]
     fn build_hasher(&self) -> Self::Hasher {
         self.build_hasher()
     }
@@ -769,6 +784,11 @@ mod tests {
         let cloned: RandomXxh3Builder = builder.clone();
         assert_eq!(builder.hash_one(TEST_DATA), builder.hash_one(TEST_DATA));
         assert_eq!(cloned.hash_one(TEST_DATA), builder.hash_one(TEST_DATA));
+
+        // the hashes of CustomXxh3Hasher::new() with the builder's seed
+        let mut expected: CustomXxh3Hasher = CustomXxh3Hasher::new(builder.seed);
+        TEST_DATA.hash(&mut expected);
+        assert_eq!(builder.hash_one(TEST_DATA), expected.finish());
     }
 
     #[test]
