@@ -283,11 +283,8 @@ impl Debug for CustomXxh3Hasher {
 
 #[cfg(feature = "size_of")]
 impl SizeOf for CustomXxh3Hasher {
-    fn size_of_children(&self, context: &mut Context) {
-        context
-            .add(size_of::<CustomXxh3Hasher>())
-            .add_distinct_allocation();
-    }
+    /// Nothing to add: all of the hasher's state is inline, none on the heap.
+    fn size_of_children(&self, _context: &mut Context) {}
 }
 
 /* --------------------------------- */
@@ -507,6 +504,8 @@ fn validate_secret_size(secret: &[u8]) -> Option<Result<CustomXxh3Hasher, Xxh3Er
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "size_of")]
+    use size_of::TotalSize;
 
     const TEST_DATA: &[u8] = b"Hello, world!";
     const TEST_SECRET: [u8; XXH3_SECRET_SIZE] = const_custom_default_secret(1);
@@ -646,6 +645,23 @@ mod tests {
             builder.write(&test_input(300));
             assert_eq!(builder.hash_one(TEST_DATA), expected.finish(), "config {i}");
         }
+    }
+
+    #[cfg(feature = "size_of")]
+    #[test]
+    fn test_size_of() {
+        let size: TotalSize = CustomXxh3Hasher::default().size_of();
+        assert_eq!(size.total_bytes(), size_of::<CustomXxh3Hasher>());
+        assert_eq!(size.distinct_allocations(), 0);
+
+        let mut quick: QuickXxh3Hasher = QuickXxh3Hasher::default();
+        quick.write(&test_input(2 * QUICK_BUF_SIZE));
+        let size: TotalSize = quick.size_of();
+        assert_eq!(
+            size.total_bytes(),
+            size_of::<QuickXxh3Hasher>() + size_of::<CustomXxh3Hasher>()
+        );
+        assert_eq!(size.distinct_allocations(), 1);
     }
 
     #[test]
