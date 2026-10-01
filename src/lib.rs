@@ -243,9 +243,11 @@ impl Hasher for CustomXxh3Hasher {
 impl BuildHasher for CustomXxh3Hasher {
     type Hasher = CustomXxh3Hasher;
 
-    /// Build a [CustomXxh3Hasher] with the default seed.
+    /// Build a fresh [CustomXxh3Hasher] with this one's seed and secret.
     fn build_hasher(&self) -> Self::Hasher {
-        Self::default()
+        let mut hasher: CustomXxh3Hasher = self.clone();
+        hasher.xxh.reset();
+        hasher
     }
 }
 
@@ -625,6 +627,24 @@ mod tests {
                     "case {i}: seed restored, {len} bytes"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_build_hasher_keeps_config() {
+        let configs: [fn() -> CustomXxh3Hasher; 4] = [
+            CustomXxh3Hasher::default,
+            || CustomXxh3Hasher::new(42),
+            || CustomXxh3Hasher::with_secret(&TEST_SECRET).unwrap(),
+            || CustomXxh3Hasher::with_secret_and_seed(&TEST_SECRET, 42).unwrap(),
+        ];
+        for (i, config) in configs.iter().enumerate() {
+            let mut expected: CustomXxh3Hasher = config();
+            TEST_DATA.hash(&mut expected);
+            // input written to the builder must not carry over to built hashers
+            let mut builder: CustomXxh3Hasher = config();
+            builder.write(&test_input(300));
+            assert_eq!(builder.hash_one(TEST_DATA), expected.finish(), "config {i}");
         }
     }
 
