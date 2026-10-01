@@ -1,4 +1,4 @@
-// Copyright (c) 2024-2025 Mikko Tanner. All rights reserved.
+// Copyright (c) 2024-2026 Mikko Tanner. All rights reserved.
 // License: MIT OR Apache-2.0
 
 use std::{

@@ -134,7 +134,7 @@ The implementation includes some error handling and validation:
 
 ## License
 
-Copyright (c) 2024-2025 Mikko Tanner. All rights reserved.
+Copyright (c) 2024-2026 Mikko Tanner. All rights reserved.
 
 License: MIT OR Apache-2.0
 
@@ -144,6 +144,14 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Version History
 
+- 0.4.0: Correctness fixes
+    - `with_secret_and_seed()`: both the secret and the seed now affect every input; the secret used to be ignored for
+      inputs up to 240 bytes, the seed for longer ones. **Changes its hashes for non-zero seeds**
+    - `change_seed()` on a default hasher keeps the crate's custom secret. **Changes the hashes after it**
+    - A `CustomXxh3Hasher` used as a `BuildHasher` builds hashers with its own seed and secret, not the defaults
+    - `Xxh3Wrapper` can be built outside the crate, hashes via `Xxh3Hashable::xxh3()` and works as a `HashMap` key
+    - `SizeOf` no longer counts a `CustomXxh3Hasher` twice
+    - `Xxh3Error` implements `Display` and `Error`, `RandomXxh3Builder` is `Clone`
 - 0.3.1: Faster hashing of small items
     - `QuickXxh3Hasher` for short inputs, used by `hash_item()`: ~6x faster for small items, same hashes
 - 0.3.0: Initial library version
