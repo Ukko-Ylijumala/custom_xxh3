@@ -101,8 +101,8 @@ pub fn build_xxh3_with_custom_secret() -> Xxh3 {
 /* --------------------------------- */
 
 /**
-A custom [Xxh3] hasher with a configurable seed (non-zero default
-seed is also provided).
+A custom [Xxh3] hasher with a configurable seed and secret. The default
+is seed 0 with our custom secret, itself derived from a non-zero seed.
 
 This hasher can be used as a drop-in replacement for the standard
 [std::hash::DefaultHasher], with these notable differences:
@@ -111,6 +111,13 @@ This hasher can be used as a drop-in replacement for the standard
 - it can be used as a [BuildHasher] for [HashMap](std::collections::HashMap) and friends
 - the hash output is stable by default (no randomization)
 - `xxHash3` is extremely fast for hashing large amounts of data
+
+Stable output means that the same bytes always hash the same, on any
+platform. Values hashed through their [Hash] impls depend on the bytes
+those feed the hasher, which differ between platforms (endianness, `usize`
+width) and may change between Rust versions. For a hash that must not
+change, e.g. one that is stored, hash the bytes with [hash_bytes] or
+[Hasher::write].
 */
 #[derive(Clone)]
 pub struct CustomXxh3Hasher {
@@ -507,9 +514,10 @@ impl<T: Xxh3Hashable> Hash for Xxh3Wrapper<T> {
 /* --------------------------------- */
 
 /**
-Add randomized state initialization similar to SipHash: each builder draws
-a random seed once, and builds [QuickXxh3Hasher]s hashing as
-[CustomXxh3Hasher::new] with that seed.
+Randomized hashing, like std's [RandomState]: each builder draws a random
+seed once, and builds [QuickXxh3Hasher]s hashing as [CustomXxh3Hasher::new]
+with that seed. Unlike SipHash, though, xxh3 is not designed to resist
+collisions crafted by an attacker (HashDoS), seeded or not.
 */
 #[derive(Clone)]
 pub struct RandomXxh3Builder {
@@ -594,7 +602,8 @@ The result is the same as with a default [CustomXxh3Hasher], but as this
 uses a [QuickXxh3Hasher], short items (up to 240 bytes of input) are
 hashed without setting up a streaming `Xxh3` for each call.
 If the item can be represented as a byte slice, [hash_bytes] is still the
-most direct way.
+most direct way. Note that the hash depends on the item's [Hash] impl; see
+[CustomXxh3Hasher] on what stable output covers.
 */
 #[inline]
 pub fn hash_item<T>(item: &T) -> u64

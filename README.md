@@ -7,10 +7,17 @@ A customized hasher built on the high-performance Rust XXH3 hashing algorithm th
 - **Drop-in Replacement**: Should work as a direct replacement of the standard `DefaultHasher`
 - **State Resetting**: Unlike standard hashers, state can be reset without recreation
 - **Configurable hashing**: Support for both custom seeds and secrets
-- **Stable Output**: Deterministic by default with optional randomization
+- **Stable Output**: Deterministic by default with optional randomization (see below on what is stable)
 
 Please note that Xxh3 hashes are *not* cryptographically safe and it should *not* be used for anything
 even remotely related to cryptography. The main selling points are performance and repeatable hashing.
+Nor is the randomized `RandomXxh3Builder` a defence against collisions crafted by an attacker (HashDoS),
+as std's SipHash is designed to be.
+
+Stable output means that the same bytes always hash the same, on any platform. Values hashed through
+their `Hash` impls (`hash_item()`, or `value.hash(&mut hasher)`) depend on the bytes those feed the hasher,
+which differ between platforms (endianness, `usize` width) and may change between Rust versions. For a
+hash that must not change, e.g. one that is stored, hash the bytes with `hash_bytes()` or `write()`.
 
 ## Installation
 
