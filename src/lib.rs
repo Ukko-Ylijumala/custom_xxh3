@@ -45,13 +45,35 @@ fn build_xxh3_with_secret(secret: [u8; XXH3_SECRET_SIZE]) -> Xxh3 {
     Xxh3Builder::new().with_secret(secret).build()
 }
 
-/// Build a new [Xxh3] hasher with a given seed and secret.
-/// Secret size must be exactly [XXH3_SECRET_SIZE] bytes (192).
+/**
+Build a new [Xxh3] hasher with a given seed and secret.
+Secret size must be exactly [XXH3_SECRET_SIZE] bytes (192).
+
+The seed is applied to the secret ([seeded_secret]) instead of being handed
+to [Xxh3]: given both, [Xxh3] hashes inputs of up to 240 bytes with its own
+default secret, and longer ones without the seed.
+*/
 fn build_xxh3_with_secret_and_seed(secret: [u8; XXH3_SECRET_SIZE], seed: u64) -> Xxh3 {
-    Xxh3Builder::new()
-        .with_secret(secret)
-        .with_seed(seed)
-        .build()
+    build_xxh3_with_secret(seeded_secret(&secret, seed))
+}
+
+/**
+Apply `seed` to `secret` the way xxh3 derives a secret from a seed: add it
+to the first and subtract it from the second `u64` of each 16-byte block.
+A seed of 0 leaves the secret as is.
+*/
+fn seeded_secret(secret: &[u8; XXH3_SECRET_SIZE], seed: u64) -> [u8; XXH3_SECRET_SIZE] {
+    let mut derived: [u8; XXH3_SECRET_SIZE] = *secret;
+    let (words, _) = derived.as_chunks_mut::<8>();
+    for (i, word) in words.iter_mut().enumerate() {
+        let value: u64 = u64::from_le_bytes(*word);
+        let value: u64 = match i % 2 {
+            0 => value.wrapping_add(seed),
+            _ => value.wrapping_sub(seed),
+        };
+        *word = value.to_le_bytes();
+    }
+    derived
 }
 
 /// Build a new [Xxh3] hasher with our custom [XXH3_SECRET].
@@ -114,7 +136,8 @@ impl CustomXxh3Hasher {
         })
     }
 
-    /// Build a Xxh3 hasher with a custom secret and seed
+    /// Build a Xxh3 hasher with a custom secret and seed. Both of them
+    /// affect the hash of every input, short or long.
     pub fn with_secret_and_seed(secret: &[u8], seed: u64) -> Result<Self, Xxh3Error> {
         if let Some(value) = validate_secret_size(secret) {
             return value;
@@ -469,6 +492,18 @@ mod tests {
     use super::*;
 
     const TEST_DATA: &[u8] = b"Hello, world!";
+    const TEST_SECRET: [u8; XXH3_SECRET_SIZE] = const_custom_default_secret(1);
+    /// Input lengths covering each of xxh3's size tiers.
+    const TEST_LENGTHS: [usize; 9] = [0, 3, 8, 16, 100, 200, 240, 241, 1000];
+
+    fn test_input(len: usize) -> Vec<u8> {
+        (0..len).map(|i: usize| (i * 7 + 3) as u8).collect()
+    }
+
+    fn digest(mut hasher: CustomXxh3Hasher, input: &[u8]) -> u64 {
+        hasher.write(input);
+        hasher.finish()
+    }
 
     #[test]
     fn test_default_hash_stability() {
@@ -498,6 +533,45 @@ mod tests {
             hasher2.finish(),
             "Custom XXH3 hashes should match"
         );
+    }
+
+    #[test]
+    fn test_seeded_secret_matches_xxh3() {
+        let default_secret: [u8; XXH3_SECRET_SIZE] = const_custom_default_secret(0);
+        for seed in [0, 1, XXH3_SECRET_SEED, u64::MAX] {
+            assert_eq!(
+                seeded_secret(&default_secret, seed),
+                const_custom_default_secret(seed),
+                "seed {seed:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_secret_and_seed_both_matter() {
+        let other_secret: [u8; XXH3_SECRET_SIZE] = const_custom_default_secret(2);
+        let with = |secret: &[u8], seed: u64| -> CustomXxh3Hasher {
+            CustomXxh3Hasher::with_secret_and_seed(secret, seed).unwrap()
+        };
+        for len in TEST_LENGTHS {
+            let input: Vec<u8> = test_input(len);
+            let expected: u64 = digest(with(&TEST_SECRET, 7), &input);
+            assert_ne!(
+                digest(with(&other_secret, 7), &input),
+                expected,
+                "secret ignored, {len} bytes"
+            );
+            assert_ne!(
+                digest(with(&TEST_SECRET, 8), &input),
+                expected,
+                "seed ignored, {len} bytes"
+            );
+            assert_eq!(
+                digest(with(&TEST_SECRET, 0), &input),
+                digest(CustomXxh3Hasher::with_secret(&TEST_SECRET).unwrap(), &input),
+                "seed 0 should equal no seed, {len} bytes"
+            );
+        }
     }
 
     #[test]
