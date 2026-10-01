@@ -100,7 +100,17 @@ This hasher can be used as a drop-in replacement for the standard
 pub struct CustomXxh3Hasher {
     xxh: Xxh3,
     seed: u64,
-    custom_secret: Option<[u8; XXH3_SECRET_SIZE]>,
+    secret: Xxh3Secret,
+}
+
+/// The secret a [CustomXxh3Hasher] is built with, kept for [CustomXxh3Hasher::change_seed].
+#[derive(Clone)]
+enum Xxh3Secret {
+    /// Xxh3's own default secret, with any seed applied by [Xxh3] itself.
+    Xxh3Default,
+    /// [XXH3_SECRET], referred to rather than copied into every hasher.
+    Crate,
+    Custom([u8; XXH3_SECRET_SIZE]),
 }
 
 impl CustomXxh3Hasher {
@@ -109,7 +119,7 @@ impl CustomXxh3Hasher {
         Self {
             xxh: build_xxh3_with_seed(seed),
             seed,
-            custom_secret: None,
+            secret: Xxh3Secret::Xxh3Default,
         }
     }
 
@@ -118,7 +128,7 @@ impl CustomXxh3Hasher {
         Self {
             xxh: Xxh3Builder::new().build(),
             seed: 0,
-            custom_secret: None,
+            secret: Xxh3Secret::Xxh3Default,
         }
     }
 
@@ -132,7 +142,7 @@ impl CustomXxh3Hasher {
         Ok(Self {
             xxh: build_xxh3_with_secret(arr),
             seed: 0,
-            custom_secret: Some(arr),
+            secret: Xxh3Secret::Custom(arr),
         })
     }
 
@@ -147,7 +157,7 @@ impl CustomXxh3Hasher {
         Ok(Self {
             xxh: build_xxh3_with_secret_and_seed(arr, seed),
             seed,
-            custom_secret: Some(arr),
+            secret: Xxh3Secret::Custom(arr),
         })
     }
 
@@ -156,9 +166,13 @@ impl CustomXxh3Hasher {
         self.seed
     }
 
-    /// Get the secret value used by this hasher, if it's not the default.
+    /// Get the secret value used by this hasher, if it's not Xxh3's default.
     fn secret(&self) -> Option<&[u8; XXH3_SECRET_SIZE]> {
-        self.custom_secret.as_ref()
+        match &self.secret {
+            Xxh3Secret::Xxh3Default => None,
+            Xxh3Secret::Crate => Some(&XXH3_SECRET),
+            Xxh3Secret::Custom(secret) => Some(secret),
+        }
     }
 
     /// Return the current hash digest and reset the hasher to its initial state.
@@ -202,7 +216,7 @@ impl Default for CustomXxh3Hasher {
         Self {
             xxh: build_xxh3_with_secret(XXH3_SECRET),
             seed: 0,
-            custom_secret: None,
+            secret: Xxh3Secret::Crate,
         }
     }
 }
@@ -257,9 +271,10 @@ impl Debug for CustomXxh3Hasher {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "CustomXxh3Hasher(hash: {}, seed: {})",
+            "CustomXxh3Hasher(hash: {}, seed: {}, custom secret: {})",
             self.finish(),
-            self.seed
+            self.seed,
+            self.secret().is_some()
         )
     }
 }
@@ -571,6 +586,45 @@ mod tests {
                 digest(CustomXxh3Hasher::with_secret(&TEST_SECRET).unwrap(), &input),
                 "seed 0 should equal no seed, {len} bytes"
             );
+        }
+    }
+
+    #[test]
+    fn test_change_seed_keeps_secret() {
+        let seeded = |secret: &[u8]| -> CustomXxh3Hasher {
+            CustomXxh3Hasher::with_secret_and_seed(secret, 5).unwrap()
+        };
+        // (original, expected after change_seed(5))
+        let cases: [(CustomXxh3Hasher, CustomXxh3Hasher); 4] = [
+            (CustomXxh3Hasher::default(), seeded(&XXH3_SECRET)),
+            (
+                CustomXxh3Hasher::with_secret(&TEST_SECRET).unwrap(),
+                seeded(&TEST_SECRET),
+            ),
+            (CustomXxh3Hasher::new(1), CustomXxh3Hasher::new(5)),
+            (
+                CustomXxh3Hasher::new_xxh3_defaults(),
+                CustomXxh3Hasher::new(5),
+            ),
+        ];
+        for (i, (original, expected)) in cases.into_iter().enumerate() {
+            let mut changed: CustomXxh3Hasher = original.clone();
+            changed.change_seed(5);
+            let mut restored: CustomXxh3Hasher = changed.clone();
+            restored.change_seed(original.seed());
+            for len in TEST_LENGTHS {
+                let input: Vec<u8> = test_input(len);
+                assert_eq!(
+                    digest(changed.clone(), &input),
+                    digest(expected.clone(), &input),
+                    "case {i}: seed changed, {len} bytes"
+                );
+                assert_eq!(
+                    digest(restored.clone(), &input),
+                    digest(original.clone(), &input),
+                    "case {i}: seed restored, {len} bytes"
+                );
+            }
         }
     }
 
