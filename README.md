@@ -160,6 +160,16 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Version History
 
+- 0.4.1: Faster hashing
+    - `QuickXxh3Hasher` hashes up to 240 bytes in one go (was 64): ~2.7x faster for items of 65-240 bytes, ~2x for a
+      `u64`, same hashes
+    - `QuickXxh3Hasher::new(seed)`, a seeded mode hashing as `CustomXxh3Hasher::new(seed)`
+    - `RandomXxh3Builder` draws its seed once and builds quick hashers: ~40x faster per hash, same hashes. A `HashMap`
+      with it is now ~2-2.5x faster than with std's `RandomState` for `u64` keys. **API change:** `build_hasher()`
+      returns a `QuickXxh3Hasher<true>` instead of a `CustomXxh3Hasher`
+    - `QuickXxh3Builder`, a `BuildHasher` of `QuickXxh3Hasher`s with stable hashes
+    - `hash_batch()` hashes a slice of integers in one write: ~16x faster, same hashes
+    - Requires Rust 1.93
 - 0.4.0: Correctness fixes
     - `with_secret_and_seed()`: both the secret and the seed now affect every input; the secret used to be ignored for
       inputs up to 240 bytes, the seed for longer ones. **Changes its hashes for non-zero seeds**
