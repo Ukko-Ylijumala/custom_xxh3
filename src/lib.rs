@@ -157,30 +157,22 @@ impl CustomXxh3Hasher {
 
     /// Build a Xxh3 hasher with a custom secret
     pub fn with_secret(secret: &[u8]) -> Result<Self, Xxh3Error> {
-        if let Some(value) = validate_secret_size(secret) {
-            return value;
-        }
-        let mut arr = [0u8; XXH3_SECRET_SIZE];
-        arr.copy_from_slice(secret);
+        let secret: [u8; XXH3_SECRET_SIZE] = validate_secret_size(secret)?;
         Ok(Self {
-            xxh: build_xxh3_with_secret(arr),
+            xxh: build_xxh3_with_secret(secret),
             seed: 0,
-            secret: Xxh3Secret::Custom(arr),
+            secret: Xxh3Secret::Custom(secret),
         })
     }
 
     /// Build a Xxh3 hasher with a custom secret and seed. Both of them
     /// affect the hash of every input, short or long.
     pub fn with_secret_and_seed(secret: &[u8], seed: u64) -> Result<Self, Xxh3Error> {
-        if let Some(value) = validate_secret_size(secret) {
-            return value;
-        }
-        let mut arr = [0u8; XXH3_SECRET_SIZE];
-        arr.copy_from_slice(secret);
+        let secret: [u8; XXH3_SECRET_SIZE] = validate_secret_size(secret)?;
         Ok(Self {
-            xxh: build_xxh3_with_secret_and_seed(arr, seed),
+            xxh: build_xxh3_with_secret_and_seed(secret, seed),
             seed,
-            secret: Xxh3Secret::Custom(arr),
+            secret: Xxh3Secret::Custom(secret),
         })
     }
 
@@ -615,13 +607,12 @@ where
     hasher.finish()
 }
 
-/// Validate the secret size for [CustomXxh3Hasher]
+/// Validate the secret size for [CustomXxh3Hasher], returning the secret as an array.
 #[inline]
-fn validate_secret_size(secret: &[u8]) -> Option<Result<CustomXxh3Hasher, Xxh3Error>> {
-    if secret.len() != XXH3_SECRET_SIZE {
-        return Some(Err(Xxh3Error::InvalidSecretSize(secret.len())));
-    }
-    None
+fn validate_secret_size(secret: &[u8]) -> Result<[u8; XXH3_SECRET_SIZE], Xxh3Error> {
+    secret
+        .try_into()
+        .map_err(|_| Xxh3Error::InvalidSecretSize(secret.len()))
 }
 
 /* ######################################################################### */
