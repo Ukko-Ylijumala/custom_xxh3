@@ -112,7 +112,7 @@ let hash = hasher.finish();
 
 `QuickXxh3Builder` builds a `QuickXxh3Hasher` per map operation, with stable hashes, while
 `RandomXxh3Builder` does the same with a random seed per builder. Both beat std's `RandomState`,
-by ~2-2.5x for `u64` keys and ~1.1-1.5x for string keys in benchmarks. `Xxh3HashMap` and
+by ~2.5x for `u64` keys and ~1.3x for string keys (see Performance). `Xxh3HashMap` and
 `Xxh3HashSet` are `HashMap` and `HashSet` with `QuickXxh3Builder`, `RandomXxh3HashMap` and
 `RandomXxh3HashSet` with `RandomXxh3Builder`.
 
@@ -177,16 +177,29 @@ AMD Zen 3 machine; see the notes on hashing short inputs below):
 
 | Value                      | `DefaultHasher` | `QuickXxh3Hasher` | `CustomXxh3Hasher` |
 |----------------------------|----------------:|------------------:|-------------------:|
-| `u64`                      |             4.8 |               1.2 |               14.2 |
-| `(u32, u16)`               |             4.0 |               1.5 |               24.6 |
-| `(u64, u64, u32)`          |             5.5 |               2.0 |               25.1 |
-| `String`, 5-15 chars       |             6.3 |               4.8 |               23.8 |
-| `String`, 16-31 chars      |             8.1 |               7.9 |               23.6 |
-| `String`, 32-50 chars      |            10.6 |              11.9 |               23.9 |
-| `String`, 60-150 chars     |            25.9 |              15.5 |               28.3 |
-| `(String 5-15, u64)`       |            10.4 |               7.5 |               26.1 |
-| `String`, 1 KiB            |           174.7 |              81.6 |               68.3 |
-| `String`, 1 MiB            |          174 µs |             33 µs |              33 µs |
+| `u64`                      |             4.7 |               1.2 |               15.0 |
+| `(u32, u16)`               |             3.9 |               1.6 |               24.5 |
+| `(u64, u64, u32)`          |             5.9 |               1.9 |               25.7 |
+| `String`, 5-15 chars       |             6.5 |               5.0 |               24.1 |
+| `String`, 16-31 chars      |             8.3 |               8.3 |               23.8 |
+| `String`, 32-50 chars      |            10.7 |              12.5 |               23.9 |
+| `String`, 60-150 chars     |            25.7 |              16.9 |               28.7 |
+| `(String 5-15, u64)`       |            10.3 |               7.8 |               26.3 |
+| `String`, 1 KiB            |           153.5 |              85.0 |               70.9 |
+| `String`, 1 MiB            |          151 µs |             34 µs |              35 µs |
+
+Inserting each key into a `HashMap` and looking it up (ns per key):
+
+| Keys                         | `RandomState` | `QuickXxh3Builder` | `RandomXxh3Builder` |
+|------------------------------|--------------:|-------------------:|--------------------:|
+| 50K `u64`                    |          30.8 |               11.8 |                12.2 |
+| 4096 `&str`, 5-50 chars      |          52.4 |               40.6 |                42.9 |
+| 4096 `&str`, 60-150 chars    |          89.9 |               66.9 |                70.2 |
+
+These are the medians of the Criterion benchmarks in `benches/hashing.rs`, which `cargo bench` runs, or a
+group of them with e.g. `cargo bench -- per_value` or `cargo bench -- hashmap/u64`. Pinning the run to one
+core, e.g. with `taskset -c 2 cargo bench`, steadies the numbers, and Criterion reports how each one changed
+since the previous run.
 
 ## Optional Features
 
@@ -221,7 +234,10 @@ re-checking, not settled facts. The timings are per value, one hasher each, over
 best of 11-15 runs pinned to one core, against v0.4.3. The counters are the CPU's, with `perf stat -e
 instructions:u,ls_stlf,ls_bad_status2.stli_other` (store-forwarded loads, and loads blocked from it). As
 the variants' code layout shifts timings by up to ~20% between benchmark builds, they were compared within
-one binary, interleaved.
+one binary, interleaved. The `per_value` benchmarks (`cargo bench -- per_value`) cover the same values for
+re-checking. Note that hiding each value from the optimizer with `black_box()`, rather than the slice of
+them, skews the timings, and unevenly: SipHash's `u64` went from 4.7 to 8.4 ns, `QuickXxh3Hasher`'s from 1.2
+to 1.7 ns, and its `(u64, u64, u32)` from 1.9 to 8.6 ns, no longer folding.
 
 ### The problem: reads straddling writes
 
