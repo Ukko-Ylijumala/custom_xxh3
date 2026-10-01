@@ -10,7 +10,7 @@ use std::{
 };
 use xxhash_rust::{
     const_xxh3::const_custom_default_secret,
-    xxh3::{xxh3_64, xxh3_64_with_secret, Xxh3, Xxh3Builder},
+    xxh3::{xxh3_64, xxh3_64_with_secret, xxh3_64_with_seed, Xxh3, Xxh3Builder},
 };
 
 #[cfg(feature = "size_of")]
@@ -316,17 +316,48 @@ bytes, which xxh3 can't hash in one pass anyway, spill over into a
 
 For the same input, the hash is identical to that of the default
 [CustomXxh3Hasher], as the one-shot and streaming forms of xxh3 agree.
+With `SEEDED`, made by [QuickXxh3Hasher::new], it is identical to that of
+[CustomXxh3Hasher::new] with the same seed. The mode is a type parameter
+so that the unused one costs nothing, not even a branch.
 */
 #[derive(Clone)]
-pub struct QuickXxh3Hasher {
+pub struct QuickXxh3Hasher<const SEEDED: bool = false> {
     /// The input so far; `buf[..len]` is always initialized.
     buf: [MaybeUninit<u8>; QUICK_BUF_SIZE],
     len: usize,
+    /// Only used with `SEEDED`.
+    seed: u64,
     /// Set once the input no longer fits in `buf`.
     spill: Option<Box<CustomXxh3Hasher>>,
 }
 
-impl QuickXxh3Hasher {
+impl QuickXxh3Hasher<true> {
+    /// Create a new [QuickXxh3Hasher] hashing as [CustomXxh3Hasher::new] with `seed`.
+    #[inline]
+    pub fn new(seed: u64) -> Self {
+        Self::build(seed)
+    }
+}
+
+impl<const SEEDED: bool> QuickXxh3Hasher<SEEDED> {
+    /**
+    Built field by field so that `buf` stays uninitialized. From a struct
+    literal, whose fields are all constants, the compiler writes the whole
+    value with one memset, zeroing `buf` as well.
+    */
+    #[inline]
+    fn build(seed: u64) -> Self {
+        let mut hasher: MaybeUninit<Self> = MaybeUninit::uninit();
+        let ptr: *mut Self = hasher.as_mut_ptr();
+        // SAFETY: every field but buf is written, and buf may be uninitialized
+        unsafe {
+            (&raw mut (*ptr).len).write(0);
+            (&raw mut (*ptr).seed).write(seed);
+            (&raw mut (*ptr).spill).write(None);
+            hasher.assume_init()
+        }
+    }
+
     /// The input written so far, as long as it fits in `buf`.
     #[inline]
     fn buffered(&self) -> &[u8] {
@@ -337,7 +368,10 @@ impl QuickXxh3Hasher {
     /// Move the input so far over to a streaming hasher, and continue there.
     #[cold]
     fn spill(&mut self, bytes: &[u8]) {
-        let mut hasher: Box<CustomXxh3Hasher> = Box::default();
+        let mut hasher: Box<CustomXxh3Hasher> = Box::new(match SEEDED {
+            true => CustomXxh3Hasher::new(self.seed),
+            false => CustomXxh3Hasher::default(),
+        });
         hasher.write(self.buffered());
         hasher.write(bytes);
         self.spill = Some(hasher);
@@ -345,25 +379,14 @@ impl QuickXxh3Hasher {
 }
 
 impl Default for QuickXxh3Hasher {
-    /**
-    Built field by field so that `buf` stays uninitialized. From a struct
-    literal, whose fields are all constants, the compiler writes the whole
-    value with one memset, zeroing `buf` as well.
-    */
+    /// A [QuickXxh3Hasher] hashing as the default [CustomXxh3Hasher].
     #[inline]
     fn default() -> Self {
-        let mut hasher: MaybeUninit<Self> = MaybeUninit::uninit();
-        let ptr: *mut Self = hasher.as_mut_ptr();
-        // SAFETY: every field but buf is written, and buf may be uninitialized
-        unsafe {
-            (&raw mut (*ptr).len).write(0);
-            (&raw mut (*ptr).spill).write(None);
-            hasher.assume_init()
-        }
+        Self::build(0)
     }
 }
 
-impl Hasher for QuickXxh3Hasher {
+impl<const SEEDED: bool> Hasher for QuickXxh3Hasher<SEEDED> {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
         let end: usize = self.len + bytes.len();
@@ -386,19 +409,20 @@ impl Hasher for QuickXxh3Hasher {
     fn finish(&self) -> u64 {
         match &self.spill {
             Some(hasher) => hasher.finish(),
+            None if SEEDED => xxh3_64_with_seed(self.buffered(), self.seed),
             None => hash_bytes(self.buffered()),
         }
     }
 }
 
-impl Debug for QuickXxh3Hasher {
+impl<const SEEDED: bool> Debug for QuickXxh3Hasher<SEEDED> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "QuickXxh3Hasher(hash: {})", self.finish())
     }
 }
 
 #[cfg(feature = "size_of")]
-impl SizeOf for QuickXxh3Hasher {
+impl<const SEEDED: bool> SizeOf for QuickXxh3Hasher<SEEDED> {
     fn size_of_children(&self, context: &mut Context) {
         if self.spill.is_some() {
             context
@@ -770,30 +794,39 @@ mod tests {
         assert_eq!(size.distinct_allocations(), 1);
     }
 
-    #[test]
-    fn test_quick_hasher_matches_streaming() {
-        let data: Vec<u8> = (0..3 * QUICK_BUF_SIZE)
-            .map(|i: usize| (i * 7 + 3) as u8)
-            .collect();
+    /// Check that the quick hasher hashes as the streaming one, for every length up to 3 buffers.
+    fn check_quick_matches_streaming<const SEEDED: bool>(
+        new_quick: impl Fn() -> QuickXxh3Hasher<SEEDED>,
+        new_streaming: impl Fn() -> CustomXxh3Hasher,
+    ) {
+        let data: Vec<u8> = test_input(3 * QUICK_BUF_SIZE);
         for len in 0..data.len() {
             let input: &[u8] = &data[..len];
-            let mut streaming: CustomXxh3Hasher = CustomXxh3Hasher::default();
-            streaming.write(input);
-            let expected: u64 = streaming.finish();
+            let expected: u64 = digest(new_streaming(), input);
 
-            let mut quick: QuickXxh3Hasher = QuickXxh3Hasher::default();
+            let mut quick: QuickXxh3Hasher<SEEDED> = new_quick();
             quick.write(input);
-            assert_eq!(quick.finish(), expected, "one write of {len} bytes");
+            assert_eq!(
+                quick.finish(),
+                expected,
+                "seeded: {SEEDED}, one write of {len} bytes"
+            );
 
             // several writes, crossing the buffer size at different points
-            let mut quick: QuickXxh3Hasher = QuickXxh3Hasher::default();
+            let mut quick: QuickXxh3Hasher<SEEDED> = new_quick();
             input.chunks(13).for_each(|chunk: &[u8]| quick.write(chunk));
             assert_eq!(
                 quick.finish(),
                 expected,
-                "writes of 13 bytes, {len} in total"
+                "seeded: {SEEDED}, writes of 13 bytes, {len} in total"
             );
         }
+    }
+
+    #[test]
+    fn test_quick_hasher_matches_streaming() {
+        check_quick_matches_streaming(QuickXxh3Hasher::default, CustomXxh3Hasher::default);
+        check_quick_matches_streaming(|| QuickXxh3Hasher::new(42), || CustomXxh3Hasher::new(42));
     }
 
     #[test]
