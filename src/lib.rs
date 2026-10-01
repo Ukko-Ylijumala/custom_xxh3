@@ -633,6 +633,26 @@ mod tests {
     /// Input lengths covering each of xxh3's size tiers.
     const TEST_LENGTHS: [usize; 9] = [0, 3, 8, 16, 100, 200, 240, 241, 1000];
 
+    /**
+    Hashes of `test_input(len)` by the reference C implementation of xxh3
+    (xxHash 0.8.3), to catch any change in them, e.g. with an xxhash-rust
+    upgrade. Columns: the default [CustomXxh3Hasher], xxh3's defaults,
+    seed 42, [TEST_SECRET], and [TEST_SECRET] with seed 7 (as derived by
+    [seeded_secret]).
+    */
+    #[rustfmt::skip]
+    const KNOWN_HASHES: [(usize, [u64; 5]); 9] = [
+        (0,    [0x80822ed4294443e6, 0x2d06800538d394c2, 0xb029411ff43d84d2, 0x63b572f6de50a057, 0x5580fbcd07d0887a]),
+        (3,    [0x95831261638fd6b6, 0xa9088dda485b481c, 0x3a6eb7a191052c81, 0x962ee7d551766d62, 0x6b010b97f3e3a63b]),
+        (8,    [0xc5aac67c7fb41165, 0x60539db630471163, 0x53a895ca319fab31, 0x1f6e9fdca1201186, 0x89d1787ae5f84d83]),
+        (16,   [0xf58d560ef36dc2be, 0xb8c859b0f030b585, 0x6b1b54f65d114c69, 0x5e0054478767b7ec, 0x3a51e136ad54394d]),
+        (100,  [0xcf601930ae62ddc5, 0xb5937857f0d78c9f, 0x223ce4409957d0ce, 0x8d31013832bcb124, 0x6d498d361ad18589]),
+        (200,  [0x4cabd59b24723b7d, 0x746cd0025327bf5b, 0xb04cc37ae5a4a48d, 0x63a59acfaaa20856, 0xa65863891e5c72c6]),
+        (240,  [0x3c49c036e345306f, 0x64556dc6b462a6cf, 0x722964f8a7f16de3, 0xe1b013642eaa19d6, 0x66cdc2a808362c40]),
+        (241,  [0x56008eff81269e60, 0x8beadd3a8874fe17, 0x59fdc74e63a7aee7, 0x35969643e9fd05d4, 0x87b93dfa8fa26869]),
+        (1000, [0x89c60f53be59f9c2, 0x6c4f14bd97bd9e82, 0xf0f163846cbf0c33, 0xed03350ea6a70c2d, 0x6807f2033fa614bc]),
+    ];
+
     fn test_input(len: usize) -> Vec<u8> {
         (0..len).map(|i: usize| (i * 7 + 3) as u8).collect()
     }
@@ -683,6 +703,37 @@ mod tests {
             hasher2.finish(),
             "Custom XXH3 hashes should match"
         );
+    }
+
+    #[test]
+    fn test_known_hashes() {
+        for (len, expected) in KNOWN_HASHES {
+            let input: Vec<u8> = test_input(len);
+            let streaming: [u64; 5] = [
+                digest(CustomXxh3Hasher::default(), &input),
+                digest(CustomXxh3Hasher::new_xxh3_defaults(), &input),
+                digest(CustomXxh3Hasher::new(42), &input),
+                digest(CustomXxh3Hasher::with_secret(&TEST_SECRET).unwrap(), &input),
+                digest(
+                    CustomXxh3Hasher::with_secret_and_seed(&TEST_SECRET, 7).unwrap(),
+                    &input,
+                ),
+            ];
+            assert_eq!(streaming, expected, "streaming, {len} bytes");
+            assert_eq!(hash_bytes(&input), expected[0], "hash_bytes, {len} bytes");
+            assert_eq!(
+                hash_bytes_default(&input),
+                expected[1],
+                "hash_bytes_default, {len} bytes"
+            );
+
+            let mut quick: QuickXxh3Hasher = QuickXxh3Hasher::default();
+            quick.write(&input);
+            assert_eq!(quick.finish(), expected[0], "quick, {len} bytes");
+            let mut quick: QuickXxh3Hasher<true> = QuickXxh3Hasher::new(42);
+            quick.write(&input);
+            assert_eq!(quick.finish(), expected[2], "seeded quick, {len} bytes");
+        }
     }
 
     #[test]
