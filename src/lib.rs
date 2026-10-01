@@ -655,8 +655,8 @@ mod tests {
         let mut hasher1 = CustomXxh3Hasher::new_xxh3_defaults();
         let mut hasher2 = CustomXxh3Hasher::new_xxh3_defaults();
 
-        hasher1.write(&TEST_DATA);
-        hasher2.write(&TEST_DATA);
+        hasher1.write(TEST_DATA);
+        hasher2.write(TEST_DATA);
 
         assert_eq!(
             hasher1.finish(),
@@ -670,8 +670,8 @@ mod tests {
         let mut hasher1 = CustomXxh3Hasher::default();
         let mut hasher2 = CustomXxh3Hasher::default();
 
-        hasher1.write(&TEST_DATA);
-        hasher2.write(&TEST_DATA);
+        hasher1.write(TEST_DATA);
+        hasher2.write(TEST_DATA);
 
         assert_eq!(
             hasher1.finish(),
@@ -901,8 +901,8 @@ mod tests {
         let mut hasher1 = RandomXxh3Builder::new().build_hasher();
         let mut hasher2 = RandomXxh3Builder::new().build_hasher();
 
-        hasher1.write(&TEST_DATA);
-        hasher2.write(&TEST_DATA);
+        hasher1.write(TEST_DATA);
+        hasher2.write(TEST_DATA);
 
         assert_ne!(
             hasher1.finish(),
