@@ -212,6 +212,78 @@ The hasher is built around these core components:
 
 The default configuration uses a custom secret generated with `0xDEAD_BEEF_FEED_F00D` as seed for consistent hashing across instances.
 
+## Notes on Hashing Short Inputs
+
+How `QuickXxh3Hasher` hashes short inputs came out of measuring a number of approaches, on an AMD Zen 3 CPU
+with Rust 1.97 (LLVM 22). The effects below depend on the CPU's store-to-load forwarding and on LLVM's
+inlining heuristics, so another CPU or compiler version may well behave differently: these notes are for
+re-checking, not settled facts. The timings are per value, one hasher each, over 4096 varied values, the
+best of 11-15 runs pinned to one core, against v0.4.3. The counters are the CPU's, with `perf stat -e
+instructions:u,ls_stlf,ls_bad_status2.stli_other` (store-forwarded loads, and loads blocked from it). As
+the variants' code layout shifts timings by up to ~20% between benchmark builds, they were compared within
+one binary, interleaved.
+
+### The problem: reads straddling writes
+
+xxh3 hashes up to 240 bytes in one pass over the whole input, so a hasher fed by several `write()`s has to
+collect the input first. Collected in a memory buffer and hashed right after, short inputs are slow: xxh3
+reads them as overlapping 8-byte words from both ends, and these reads straddle the stores that just
+wrote the bytes. The CPU cannot forward stored bytes to a load spanning several stores, so the load waits
+for the stores to reach the cache, some 20-30 cycles. Hashing 26 bytes this way took ~8 ns more than
+hashing them in place (1.8 ns), with the counters showing the blocked loads. How the bytes were copied
+(`memcpy`, 8- or 16-byte chunks, overlapping front and back copies as xxh3 reads them) made no difference.
+
+### What works: the input in registers
+
+Up to 32 bytes, `QuickXxh3Hasher` keeps the input in two `u128`s, which writes are shifted into, and hashes
+it with xxh3's 0-32 byte paths ported to work on them (`xxh3_small()`). Nothing is read back from memory,
+so nothing waits, and for input of a fixed size, e.g. a `u64` or a tuple of integers, the hash folds down to
+a few dozen instructions. This hinges on what the compiler inlines, which LLVM gets wrong on its own:
+- `finish()` is `#[inline(always)]`: LLVM rated it too costly (cost 3070 vs a threshold of 325), not
+  foreseeing that a known input length folds most of it away. Out of line, the input goes through memory.
+- `write()` is `#[inline(always)]` too, but holds the path for up to 16 bytes only; the rest is in
+  `write_long()`, which LLVM leaves out of line. Any more inlined code slows down the shortest inputs.
+- `write_u8()` appends a byte straight into the registers, so the 0xff that ends every `str` stays out of
+  `write_long()`.
+- The hasher is built field by field: from a struct literal of constants, rustc writes the whole value with
+  one memset, which zeroes the uninitialized 240-byte buffer as well.
+
+### What did not work
+
+1. **A buffer of 8-byte words**: the input stored as whole aligned words plus a partial word in a register,
+   with xxh3's 17-240 byte paths ported to read back the whole words and build their unaligned windows with
+   shifts, so that no read straddles a write. The word handling made `write()` too big for LLVM to inline, and
+   with the hasher's state passed through memory between functions, it was 2-4x slower everywhere (a `u64`
+   5.7 ns vs 1.1); with `write()` split to stay inlined, still 1.6-2.5x slower for strings of 16-150 chars.
+   Blocked loads went up rather than down (8.4 vs 5.0 per 26-byte string), with 324 instructions vs 93.
+2. **32-byte registers, all handled in the inlined `write()`**: strings of 16-31 chars got faster (10.7 to
+   8.1 ns), but those of 5-15 chars slower (4.9 to 7.9 ns). The bigger inlined code made LLVM spill the
+   hasher's state to the stack: 142 instructions per short string vs 96, store-forwarded loads 5 vs 2.
+3. **The same with a separate path for up to 16 bytes in `write()`**: short strings still slower (7.2 ns),
+   the 32-byte code being inlined next to it.
+4. **The 17-32 byte code in out-of-line functions taking the registers by value**, not `&self`, to keep the
+   state out of memory: the calls cost more than they saved (297 instructions per 16-31 char string vs
+   172), and fixed-size values no longer folded.
+5. **v0.4.3's `write()`, plus an out-of-line function taking `&mut self` for writes of 17-32 bytes**: a
+   reference to the hasher passed to a function that isn't inlined puts its state in memory. A `(u32, u16)`
+   went from 1.5 to 2.9 ns, strings of 16-31 chars to 13.3 ns.
+6. **`write()` with a mere `#[inline]`**: LLVM then inlines it depending on the call site, and fixed-size
+   values lose their folding where it doesn't (260 instructions for a `(u64, u64, u32)` vs 29).
+7. **More cases in the inlined `write()`**, e.g. a first write of 17-32 bytes, or one landing wholly in the
+   upper `u128`: ~130 instructions per short string vs ~80.
+8. **`write_long()` forced inline, or kept from inlining**: inlined, short strings took 7.2 ns, and a
+   `(u64, u64, u32)` 4.9 ns vs 1.9; never inlined, more instructions for everything past 16 bytes (217 vs
+   165 per 16-31 char string).
+9. **More cases in `write_u8()`**: a full `match` on the length, or appending to the buffer past 32 bytes,
+   made short strings slower (6.4 and 7.3 ns, vs 4.4 and 4.9 without). Only the register cases pay off.
+
+### What is left
+
+Strings of 32-50 chars are hashed from the buffer and still hit the stalls: ~11-12 ns, against ~10.6 ns with
+SipHash. Longer ones are 3-10% slower than in v0.4.3 (up to 20% in one benchmark build), for the extra
+call to `write_long()` per string, but still ~1.6x faster than SipHash. Every way found to avoid the stalls
+for them added inlined code, which slowed down the shorter inputs.
+
 ## Safety and Validation
 
 The implementation includes some error handling and validation:
