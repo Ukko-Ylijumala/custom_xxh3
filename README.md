@@ -44,6 +44,9 @@ let hash = hasher.finish();
 ### With Custom Seed
 
 ```rust
+use custom_xxh3::CustomXxh3Hasher;
+use std::hash::Hasher;
+
 let mut hasher = CustomXxh3Hasher::new(12345);
 hasher.write(b"Hello, world!");
 let hash = hasher.finish();
@@ -51,10 +54,18 @@ let hash = hasher.finish();
 
 ### With Custom Secret
 
+The secret must be 192 bytes that look random: derive it from a seed of your own as below (this needs
+`xxhash-rust` with its `const_xxh3` feature as a dependency), or generate it with a proper random number
+generator. A patterned secret weakens the hash badly: with `[42; 192]`, for one, any 8 bytes of `*`
+(0x2a) in the input make the hash ignore the 8 bytes after them.
+
 ```rust
-const SECRET_SIZE: usize = 192;
-let secret = [42u8; SECRET_SIZE];
-let mut hasher = CustomXxh3Hasher::with_secret(&secret).unwrap();
+use custom_xxh3::CustomXxh3Hasher;
+use std::hash::Hasher;
+use xxhash_rust::const_xxh3::const_custom_default_secret;
+
+const SECRET: [u8; 192] = const_custom_default_secret(0x0123_4567_89AB_CDEF);
+let mut hasher = CustomXxh3Hasher::with_secret(&SECRET).unwrap();
 hasher.write(b"Hello, world!");
 let hash = hasher.finish();
 ```
@@ -62,8 +73,8 @@ let hash = hasher.finish();
 ### Randomized Hashing
 
 ```rust
-use xxh3_hasher::RandomXxh3Builder;
-use std::hash::BuildHasher;
+use custom_xxh3::RandomXxh3Builder;
+use std::hash::Hasher;
 
 let builder = RandomXxh3Builder::new();
 let mut hasher = builder.build_hasher();
@@ -90,6 +101,8 @@ random.insert("key", 1);
 ### Batch Processing
 
 ```rust
+use custom_xxh3::CustomXxh3Hasher;
+
 let data = vec!["item1", "item2", "item3"];
 let mut hasher = CustomXxh3Hasher::default();
 let hash = hasher.hash_batch(&data);
@@ -116,6 +129,9 @@ assert_eq!(hasher.finish(), hash_item(&"file.txt"));
 ### State Reset
 
 ```rust
+use custom_xxh3::CustomXxh3Hasher;
+use std::hash::Hasher;
+
 let mut hasher = CustomXxh3Hasher::default();
 hasher.write(b"First data");
 let hash1 = hasher.reset(); // Get hash and reset state
@@ -144,6 +160,7 @@ The hasher is built around these core components:
 
 - `CustomXxh3Hasher`: Main hasher implementation
 - `QuickXxh3Hasher`: Buffered one-shot hasher for short inputs, with the same results
+- `QuickXxh3Builder`: `BuildHasher` of `QuickXxh3Hasher`s, for `HashMap` and friends
 - `RandomXxh3Builder`: Randomization capability provider
 - `Xxh3Hashable`: Trait for self-hashing types
 

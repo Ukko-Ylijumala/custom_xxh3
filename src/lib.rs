@@ -626,6 +626,11 @@ fn validate_secret_size(secret: &[u8]) -> Option<Result<CustomXxh3Hasher, Xxh3Er
 
 /* ######################################################################### */
 
+/// The README's examples, compiled and run as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
