@@ -92,7 +92,7 @@ fn seeded_secret(secret: &[u8; XXH3_SECRET_SIZE], seed: u64) -> [u8; XXH3_SECRET
     derived
 }
 
-/// Build a new [Xxh3] hasher with our custom [XXH3_SECRET].
+/// Build a new [Xxh3] hasher with our custom secret (`XXH3_SECRET`).
 #[inline]
 pub fn build_xxh3_with_custom_secret() -> Xxh3 {
     Xxh3Builder::new().with_secret(XXH3_SECRET).build()
@@ -108,7 +108,7 @@ This hasher can be used as a drop-in replacement for the standard
 [std::hash::DefaultHasher], with these notable differences:
 - it uses the `xxHash3` algorithm instead of `SipHash` (obviously)
 - its state can be reset without having to recreate the full hasher
-- it can be used as a [BuildHasher] for [HashMap] and friends
+- it can be used as a [BuildHasher] for [HashMap](std::collections::HashMap) and friends
 - the hash output is stable by default (no randomization)
 - `xxHash3` is extremely fast for hashing large amounts of data
 */
@@ -229,7 +229,7 @@ impl CustomXxh3Hasher {
 /* --------------------------------- */
 
 impl Default for CustomXxh3Hasher {
-    /// A [CustomXxh3Hasher] with the default seed (0) and secret [XXH3_SECRET].
+    /// A [CustomXxh3Hasher] with the default seed (0) and our custom secret (`XXH3_SECRET`).
     fn default() -> Self {
         Self {
             xxh: build_xxh3_with_secret(XXH3_SECRET),
@@ -573,8 +573,8 @@ impl CustomXxh3Hasher {
 
 /* ########################## UTILITY FUNCTIONS ############################ */
 
-/// Hash a byte slice using [Xxh3] "oneshot" `xxh3_64_with_secret()` and a
-/// custom secret generated from constant [XXH3_SEED].
+/// Hash a byte slice using [Xxh3] "oneshot" `xxh3_64_with_secret()` and our
+/// custom secret, generated from the constant seed `0xDEAD_BEEF_FEED_F00D`.
 #[inline]
 pub fn hash_bytes(bytes: &[u8]) -> u64 {
     xxh3_64_with_secret(bytes, &XXH3_SECRET)
