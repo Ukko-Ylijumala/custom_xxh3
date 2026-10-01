@@ -75,8 +75,8 @@ let hash = hasher.hash_batch(&data);
 ### Hashing Many Small Items
 
 Setting up a streaming hasher costs more than hashing a few bytes. For one digest per item, e.g.
-per element of a collection, `hash_item()` uses a `QuickXxh3Hasher`, which buffers up to 64 bytes
-of input and hashes them in one go (~3 ns for a `u64` vs ~18 ns with a new `CustomXxh3Hasher`).
+per element of a collection, `hash_item()` uses a `QuickXxh3Hasher`, which buffers up to 240 bytes
+of input and hashes them in one go (~1 ns for a `u64` vs ~15 ns with a new `CustomXxh3Hasher`).
 The hashes are identical to those of the default `CustomXxh3Hasher`.
 
 ```rust

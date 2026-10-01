@@ -5,6 +5,7 @@ use std::{
     error::Error,
     fmt::{self, Debug, Display, Formatter},
     hash::{BuildHasher, Hash, Hasher, RandomState},
+    mem::MaybeUninit,
     ops::{Deref, DerefMut},
 };
 use xxhash_rust::{
@@ -22,11 +23,11 @@ const XXH3_SECRET_SIZE: usize = 192;
 const XXH3_SECRET_SEED: u64 = 0xDEAD_BEEF_FEED_F00D;
 const XXH3_SECRET: [u8; XXH3_SECRET_SIZE] = const_custom_default_secret(XXH3_SECRET_SEED);
 /**
-Input size up to which [QuickXxh3Hasher] hashes in one go. Its buffer is
-zeroed for every hasher, so a larger one costs extra time even for short
-inputs: ~3 ns per `u64` with 64 bytes vs ~4 ns with 128.
+Input size up to which [QuickXxh3Hasher] hashes in one go: the most xxh3
+hashes in a single pass, as it processes longer inputs in stripes. The
+buffer is left uninitialized, so its size costs nothing up front.
 */
-const QUICK_BUF_SIZE: usize = 64;
+const QUICK_BUF_SIZE: usize = 240;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Xxh3Error {
@@ -308,38 +309,56 @@ impl SizeOf for CustomXxh3Hasher {
 A [Hasher] for hashing one short item at a time, e.g. a digest per element
 of a collection. Setting up a streaming [Xxh3] (as in [CustomXxh3Hasher])
 costs far more than hashing a few bytes, so this hasher collects the input
-in a buffer and hashes it in one go with [hash_bytes]: ~3 ns for a `u64`,
-where setting up a [CustomXxh3Hasher] takes ~18 ns. Inputs longer than 64
-bytes spill over into a [CustomXxh3Hasher].
+in a buffer and hashes it in one go with [hash_bytes]: ~1 ns for a `u64`,
+where setting up a [CustomXxh3Hasher] takes ~15 ns. Inputs longer than 240
+bytes, which xxh3 can't hash in one pass anyway, spill over into a
+[CustomXxh3Hasher].
 
 For the same input, the hash is identical to that of the default
 [CustomXxh3Hasher], as the one-shot and streaming forms of xxh3 agree.
 */
 #[derive(Clone)]
 pub struct QuickXxh3Hasher {
-    buf: [u8; QUICK_BUF_SIZE],
+    /// The input so far; `buf[..len]` is always initialized.
+    buf: [MaybeUninit<u8>; QUICK_BUF_SIZE],
     len: usize,
     /// Set once the input no longer fits in `buf`.
     spill: Option<Box<CustomXxh3Hasher>>,
 }
 
 impl QuickXxh3Hasher {
+    /// The input written so far, as long as it fits in `buf`.
+    #[inline]
+    fn buffered(&self) -> &[u8] {
+        // SAFETY: write() initializes buf[..len] before extending len over it
+        unsafe { self.buf[..self.len].assume_init_ref() }
+    }
+
     /// Move the input so far over to a streaming hasher, and continue there.
     #[cold]
     fn spill(&mut self, bytes: &[u8]) {
         let mut hasher: Box<CustomXxh3Hasher> = Box::default();
-        hasher.write(&self.buf[..self.len]);
+        hasher.write(self.buffered());
         hasher.write(bytes);
         self.spill = Some(hasher);
     }
 }
 
 impl Default for QuickXxh3Hasher {
+    /**
+    Built field by field so that `buf` stays uninitialized. From a struct
+    literal, whose fields are all constants, the compiler writes the whole
+    value with one memset, zeroing `buf` as well.
+    */
+    #[inline]
     fn default() -> Self {
-        Self {
-            buf: [0; QUICK_BUF_SIZE],
-            len: 0,
-            spill: None,
+        let mut hasher: MaybeUninit<Self> = MaybeUninit::uninit();
+        let ptr: *mut Self = hasher.as_mut_ptr();
+        // SAFETY: every field but buf is written, and buf may be uninitialized
+        unsafe {
+            (&raw mut (*ptr).len).write(0);
+            (&raw mut (*ptr).spill).write(None);
+            hasher.assume_init()
         }
     }
 }
@@ -351,18 +370,23 @@ impl Hasher for QuickXxh3Hasher {
         if let Some(hasher) = &mut self.spill {
             hasher.write(bytes);
         } else if end <= QUICK_BUF_SIZE {
-            self.buf[self.len..end].copy_from_slice(bytes);
+            self.buf[self.len..end].write_copy_of_slice(bytes);
             self.len = end;
         } else {
             self.spill(bytes);
         }
     }
 
-    #[inline]
+    /**
+    Always inlined: for input of a fixed size, e.g. a `u64`, the hash then
+    folds down to a few instructions with no buffer at all. LLVM's inliner
+    doesn't foresee that, and often keeps it out of line otherwise.
+    */
+    #[inline(always)]
     fn finish(&self) -> u64 {
         match &self.spill {
             Some(hasher) => hasher.finish(),
-            None => hash_bytes(&self.buf[..self.len]),
+            None => hash_bytes(self.buffered()),
         }
     }
 }
@@ -519,7 +543,7 @@ A function to hash an item using [Xxh3] as the hasher. The item in
 question must implement the [Hash] trait, obviously.
 
 The result is the same as with a default [CustomXxh3Hasher], but as this
-uses a [QuickXxh3Hasher], short items (up to 64 bytes of input) are
+uses a [QuickXxh3Hasher], short items (up to 240 bytes of input) are
 hashed without setting up a streaming `Xxh3` for each call.
 If the item can be represented as a byte slice, [hash_bytes] is still the
 most direct way.
