@@ -184,6 +184,10 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Version History
 
+- 0.4.2: Docs and tests, no changes in behavior
+    - Known-answer tests: the hashes match the reference C implementation of xxh3
+    - The README examples are fixed and run as doctests; the custom secret example no longer uses a weak secret
+    - The docs say what stable output covers (bytes, not values hashed through their `Hash` impls)
 - 0.4.1: Faster hashing
     - `QuickXxh3Hasher` hashes up to 240 bytes in one go (was 64): ~2.7x faster for items of 65-240 bytes, ~2x for a
       `u64`, same hashes
