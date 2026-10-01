@@ -2,7 +2,8 @@
 // License: MIT OR Apache-2.0
 
 use std::{
-    fmt::{self, Debug, Formatter},
+    error::Error,
+    fmt::{self, Debug, Display, Formatter},
     hash::{BuildHasher, Hash, Hasher, RandomState},
     ops::{Deref, DerefMut},
 };
@@ -27,10 +28,24 @@ inputs: ~3 ns per `u64` with 64 bytes vs ~4 ns with 128.
 */
 const QUICK_BUF_SIZE: usize = 64;
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Xxh3Error {
+    /// The secret is not 192 bytes long; holds its actual length.
     InvalidSecretSize(usize),
 }
+
+impl Display for Xxh3Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidSecretSize(len) => write!(
+                f,
+                "invalid secret size: {len} bytes, expected {XXH3_SECRET_SIZE}"
+            ),
+        }
+    }
+}
+
+impl Error for Xxh3Error {}
 
 /// Build a new [Xxh3] hasher with a given seed and Xxh3 default secret.
 #[inline]
@@ -435,6 +450,7 @@ impl<T: Xxh3Hashable> Hash for Xxh3Wrapper<T> {
 /* --------------------------------- */
 
 /// Add randomized state initialization similar to SipHash
+#[derive(Clone, Debug)]
 pub struct RandomXxh3Builder(RandomState);
 
 impl RandomXxh3Builder {
@@ -686,6 +702,25 @@ mod tests {
             builder.write(&test_input(300));
             assert_eq!(builder.hash_one(TEST_DATA), expected.finish(), "config {i}");
         }
+    }
+
+    #[test]
+    fn test_invalid_secret_size() {
+        let error: Xxh3Error = CustomXxh3Hasher::with_secret(&[0; 10]).unwrap_err();
+        assert_eq!(error, Xxh3Error::InvalidSecretSize(10));
+        let error: Box<dyn Error> = Box::new(error);
+        assert_eq!(
+            error.to_string(),
+            "invalid secret size: 10 bytes, expected 192"
+        );
+    }
+
+    #[test]
+    fn test_random_builder_is_consistent() {
+        let builder: RandomXxh3Builder = RandomXxh3Builder::new();
+        let cloned: RandomXxh3Builder = builder.clone();
+        assert_eq!(builder.hash_one(TEST_DATA), builder.hash_one(TEST_DATA));
+        assert_eq!(cloned.hash_one(TEST_DATA), builder.hash_one(TEST_DATA));
     }
 
     #[test]
