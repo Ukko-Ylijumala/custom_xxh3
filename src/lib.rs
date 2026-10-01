@@ -2,6 +2,7 @@
 // License: MIT OR Apache-2.0
 
 use std::{
+    collections::{HashMap, HashSet},
     error::Error,
     fmt::{self, Debug, Display, Formatter},
     hash::{BuildHasher, BuildHasherDefault, Hash, Hasher, RandomState},
@@ -112,7 +113,7 @@ This hasher can be used as a drop-in replacement for the standard
 [std::hash::DefaultHasher], with these notable differences:
 - it uses the `xxHash3` algorithm instead of `SipHash` (obviously)
 - its state can be reset without having to recreate the full hasher
-- it can be used as a [BuildHasher] for [HashMap](std::collections::HashMap) and friends
+- it can be used as a [BuildHasher] for [HashMap] and friends
 - the hash output is stable by default (no randomization)
 - `xxHash3` is extremely fast for hashing large amounts of data
 
@@ -701,6 +702,21 @@ impl BuildHasher for RandomXxh3Builder {
 
 /* --------------------------------- */
 
+/**
+A [HashMap] with stable hashes, by [QuickXxh3Builder], to swap in for std's.
+As `HashMap::new()` exists for std's [RandomState] only, create it with
+`Xxh3HashMap::default()`, or `with_capacity_and_hasher(n, Default::default())`.
+*/
+pub type Xxh3HashMap<K, V> = HashMap<K, V, QuickXxh3Builder>;
+/// A [HashSet] with stable hashes, by [QuickXxh3Builder]; see [Xxh3HashMap].
+pub type Xxh3HashSet<T> = HashSet<T, QuickXxh3Builder>;
+/// A [HashMap] with hashes randomized per map, by [RandomXxh3Builder]; see [Xxh3HashMap].
+pub type RandomXxh3HashMap<K, V> = HashMap<K, V, RandomXxh3Builder>;
+/// A [HashSet] with hashes randomized per set, by [RandomXxh3Builder]; see [Xxh3HashMap].
+pub type RandomXxh3HashSet<T> = HashSet<T, RandomXxh3Builder>;
+
+/* --------------------------------- */
+
 pub trait Xxh3OptimizedHash {
     /// Provide specialized hashing for specific types
     fn hash_optimized<H: Hasher>(&self, state: &mut H);
@@ -1027,6 +1043,22 @@ mod tests {
             input.hash(&mut expected);
             assert_eq!(builder.hash_one(&input), expected.finish(), "{len} bytes");
         }
+    }
+
+    #[test]
+    fn test_map_aliases() {
+        let mut map: Xxh3HashMap<&str, u32> = Xxh3HashMap::default();
+        map.insert("key", 1);
+        let mut random: RandomXxh3HashMap<&str, u32> = RandomXxh3HashMap::default();
+        random.insert("key", 1);
+        assert_eq!(map["key"], random["key"]);
+
+        // stable hashes: sets built alike iterate alike
+        let set: Xxh3HashSet<u64> = (0..100).collect();
+        let again: Xxh3HashSet<u64> = (0..100).collect();
+        assert!(set.iter().eq(again.iter()));
+        let random: RandomXxh3HashSet<u64> = (0..100).collect();
+        assert_eq!(random, set.iter().copied().collect());
     }
 
     #[test]
