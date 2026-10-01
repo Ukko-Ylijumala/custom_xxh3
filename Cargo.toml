@@ -1,6 +1,6 @@
 [package]
 name = "custom_xxh3"
-version = "0.4.2"
+version = "0.4.3"
 authors = ["Mikko Tanner <mikko.tanner@gmail.com>"]
 description = "Customized xxh3 hasher and hash builder"
 readme = "README.md"

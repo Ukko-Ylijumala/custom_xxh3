@@ -228,6 +228,13 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Version History
 
+- 0.4.3: Drop-in replacement for std's hashing
+    - `new()` builds the default hasher, as `DefaultHasher::new()` does. **API change:** the seeded constructors are
+      now `with_seed(seed)`, on `CustomXxh3Hasher` and `QuickXxh3Hasher`
+    - `QuickXxh3Hasher` hashes inputs of up to 16 bytes from a register: ~5x faster for small multi-field values,
+      ~2x for strings of up to 15 chars, same hashes
+    - `Xxh3HashMap`, `Xxh3HashSet`, `RandomXxh3HashMap` and `RandomXxh3HashSet` aliases
+    - Docs on which type replaces which of std's, with timings against `DefaultHasher`
 - 0.4.2: Docs and tests, no changes in behavior
     - Known-answer tests: the hashes match the reference C implementation of xxh3
     - The README examples are fixed and run as doctests; the custom secret example no longer uses a weak secret
