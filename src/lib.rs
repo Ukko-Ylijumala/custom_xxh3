@@ -389,18 +389,46 @@ pub trait Xxh3Hashable {
 
 /**
 A wrapper struct for hashing a value that implements [Xxh3Hashable] using
-the standard [Hash] trait.
+the standard [Hash] trait, e.g. as a `HashMap` key: hashing the wrapper
+feeds the value to the hasher with [Xxh3Hashable::xxh3]. As with [Hash],
+values equal by [Eq] must feed the hasher the same input.
 
 Example:
-```ignore
-let mut map = HashMap::new();
-map.insert(Xxh3Wrapper(my_structure), value);
-*/
-pub struct Xxh3Wrapper<T>(T);
+```
+use custom_xxh3::{QuickXxh3Hasher, Xxh3Hashable, Xxh3Wrapper};
+use std::collections::HashMap;
+use std::hash::Hasher;
 
-impl<T: Hash + Xxh3Hashable> Hash for Xxh3Wrapper<T> {
+#[derive(PartialEq, Eq)]
+struct Point {
+    x: u32,
+    y: u32,
+}
+
+impl Xxh3Hashable for Point {
+    fn xxh3<H: Hasher>(&self, state: &mut H) {
+        state.write_u32(self.x);
+        state.write_u32(self.y);
+    }
+
+    fn xxh3_digest(&self) -> u64 {
+        let mut hasher = QuickXxh3Hasher::default();
+        self.xxh3(&mut hasher);
+        hasher.finish()
+    }
+}
+
+let mut map = HashMap::new();
+map.insert(Xxh3Wrapper(Point { x: 1, y: 2 }), "a");
+assert_eq!(map[&Xxh3Wrapper(Point { x: 1, y: 2 })], "a");
+```
+*/
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Xxh3Wrapper<T>(pub T);
+
+impl<T: Xxh3Hashable> Hash for Xxh3Wrapper<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
+        self.0.xxh3(state);
     }
 }
 
@@ -519,6 +547,19 @@ mod tests {
     fn digest(mut hasher: CustomXxh3Hasher, input: &[u8]) -> u64 {
         hasher.write(input);
         hasher.finish()
+    }
+
+    /// An [Xxh3Hashable] without a [Hash] impl, hashing as its raw bytes.
+    struct TestBytes(&'static [u8]);
+
+    impl Xxh3Hashable for TestBytes {
+        fn xxh3<H: Hasher>(&self, state: &mut H) {
+            state.write(self.0);
+        }
+
+        fn xxh3_digest(&self) -> u64 {
+            hash_bytes(self.0)
+        }
     }
 
     #[test]
@@ -645,6 +686,12 @@ mod tests {
             builder.write(&test_input(300));
             assert_eq!(builder.hash_one(TEST_DATA), expected.finish(), "config {i}");
         }
+    }
+
+    #[test]
+    fn test_xxh3_wrapper_uses_xxh3() {
+        let wrapped: Xxh3Wrapper<TestBytes> = Xxh3Wrapper(TestBytes(TEST_DATA));
+        assert_eq!(hash_item(&wrapped), wrapped.0.xxh3_digest());
     }
 
     #[cfg(feature = "size_of")]
