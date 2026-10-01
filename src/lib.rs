@@ -1,6 +1,20 @@
 // Copyright (c) 2024-2026 Mikko Tanner. All rights reserved.
 // License: MIT OR Apache-2.0
 
+/*!
+Hashing with xxh3, with drop-in replacements for std's hashing types:
+
+| std                                       | this crate                                        |
+|-------------------------------------------|---------------------------------------------------|
+| [DefaultHasher](std::hash::DefaultHasher) | [QuickXxh3Hasher], or [CustomXxh3Hasher] for its extras |
+| [RandomState]                             | [RandomXxh3Builder]                               |
+| `BuildHasherDefault<DefaultHasher>`       | [QuickXxh3Builder]                                |
+| [HashMap], [HashSet]                      | [Xxh3HashMap], [Xxh3HashSet]; randomized: [RandomXxh3HashMap], [RandomXxh3HashSet] |
+
+Create the maps and sets with `::default()`, as `::new()` exists for std's
+[RandomState] only. See [CustomXxh3Hasher] on what stable output covers.
+*/
+
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -116,6 +130,12 @@ This hasher can be used as a drop-in replacement for the standard
 - it can be used as a [BuildHasher] for [HashMap] and friends
 - the hash output is stable by default (no randomization)
 - `xxHash3` is extremely fast for hashing large amounts of data
+
+For hashing values one at a time, e.g. a `HashMap` key or a digest per
+item, [QuickXxh3Hasher] is the better replacement, with the same hashes:
+setting this one up takes ~15 ns, three times what `DefaultHasher` needs to
+hash a small item, and it is 832 bytes large. This one is for resetting and
+reseeding, custom secrets, and streaming long inputs.
 
 Stable output means that the same bytes always hash the same, on any
 platform. Values hashed through their [Hash] impls depend on the bytes
@@ -322,7 +342,8 @@ impl SizeOf for CustomXxh3Hasher {
 /* --------------------------------- */
 
 /**
-A [Hasher] for hashing one short item at a time, e.g. a digest per element
+The drop-in replacement for std's [DefaultHasher](std::hash::DefaultHasher),
+for hashing one item at a time, e.g. a `HashMap` key or a digest per element
 of a collection. Setting up a streaming [Xxh3] (as in [CustomXxh3Hasher])
 costs far more than hashing a few bytes, so this hasher collects the input
 and hashes it in one go: ~1 ns for a `u64`, where setting up a

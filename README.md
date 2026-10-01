@@ -4,7 +4,7 @@ A customized hasher built on the high-performance Rust XXH3 hashing algorithm th
 
 ## Features
 
-- **Drop-in Replacement**: Should work as a direct replacement of the standard `DefaultHasher`
+- **Drop-in Replacement**: For std's `DefaultHasher`, `RandomState`, `HashMap` and `HashSet` (see below)
 - **State Resetting**: Unlike standard hashers, state can be reset without recreation
 - **Configurable hashing**: Support for both custom seeds and secrets
 - **Stable Output**: Deterministic by default with optional randomization (see below on what is stable)
@@ -30,13 +30,39 @@ custom_xxh3 = { git = "https://github.com/Ukko-Ylijumala/custom_xxh3" }
 
 ## Usage
 
+### Replacing std's Hashing
+
+| std                                 | this crate                                                          |
+|-------------------------------------|---------------------------------------------------------------------|
+| `DefaultHasher`                     | `QuickXxh3Hasher`, or `CustomXxh3Hasher` for its extras             |
+| `RandomState`                       | `RandomXxh3Builder` (its hasher is a seeded `QuickXxh3Hasher<true>`) |
+| `BuildHasherDefault<DefaultHasher>` | `QuickXxh3Builder`                                                  |
+| `HashMap`, `HashSet`                | `Xxh3HashMap`, `Xxh3HashSet`; randomized: `RandomXxh3HashMap`, `RandomXxh3HashSet` |
+
+`QuickXxh3Hasher` and `CustomXxh3Hasher` hash the same. `QuickXxh3Hasher` is the quicker one for hashing
+values one at a time, e.g. `HashMap` keys; `CustomXxh3Hasher` can also be reset and reseeded and take a custom
+secret, but it takes ~15 ns to set up and is 832 bytes large. Create the maps and sets with `::default()`, as
+`::new()` exists for std's `RandomState` only.
+
+```rust
+use custom_xxh3::{QuickXxh3Hasher, Xxh3HashMap};
+use std::hash::{Hash, Hasher};
+
+let mut hasher = QuickXxh3Hasher::new(); // was DefaultHasher::new()
+"file.txt".hash(&mut hasher);
+let digest = hasher.finish();
+
+let mut map: Xxh3HashMap<&str, u64> = Xxh3HashMap::default(); // was HashMap::new()
+map.insert("file.txt", digest);
+```
+
 ### Basic Usage
 
 ```rust
 use custom_xxh3::CustomXxh3Hasher;
 use std::hash::Hasher;
 
-let mut hasher = CustomXxh3Hasher::default();
+let mut hasher = CustomXxh3Hasher::new();
 hasher.write(b"Hello, world!");
 let hash = hasher.finish();
 ```
@@ -86,16 +112,19 @@ let hash = hasher.finish();
 
 `QuickXxh3Builder` builds a `QuickXxh3Hasher` per map operation, with stable hashes, while
 `RandomXxh3Builder` does the same with a random seed per builder. Both beat std's `RandomState`,
-by ~2-2.5x for `u64` keys and ~1.1-1.5x for string keys in benchmarks.
+by ~2-2.5x for `u64` keys and ~1.1-1.5x for string keys in benchmarks. `Xxh3HashMap` and
+`Xxh3HashSet` are `HashMap` and `HashSet` with `QuickXxh3Builder`, `RandomXxh3HashMap` and
+`RandomXxh3HashSet` with `RandomXxh3Builder`.
 
 ```rust
-use custom_xxh3::{QuickXxh3Builder, RandomXxh3Builder};
+use custom_xxh3::{QuickXxh3Builder, RandomXxh3HashSet, Xxh3HashMap};
 use std::collections::HashMap;
 
 let mut stable: HashMap<&str, u32, QuickXxh3Builder> = HashMap::default();
 stable.insert("key", 1);
-let mut random: HashMap<&str, u32, RandomXxh3Builder> = HashMap::default();
-random.insert("key", 1);
+let mut same: Xxh3HashMap<&str, u32> = Xxh3HashMap::default();
+same.insert("key", 1);
+let random: RandomXxh3HashSet<u64> = (0..100).collect();
 ```
 
 ### Batch Processing
@@ -143,6 +172,20 @@ let hash2 = hasher.finish();
 
 The XXH3 algorithm is designed for high performance, particularly when dealing with large amounts of data. This implementation maintains those performance characteristics while adding useful features like state management and batch processing.
 
+Hashing one value per hasher with `Hash`, as `HashMap` keys or a digest per item do (ns per value, on one
+x86-64 machine):
+
+| Value                      | `DefaultHasher` | `QuickXxh3Hasher` | `CustomXxh3Hasher` |
+|----------------------------|----------------:|------------------:|-------------------:|
+| `u64`                      |             4.6 |               1.2 |               14.4 |
+| `(u32, u16)`               |             4.1 |               1.5 |               24.7 |
+| `String`, 5-15 chars       |             6.3 |               4.8 |               23.8 |
+| `String`, 16-50 chars      |             9.4 |              11.0 |               24.2 |
+| `String`, 60-150 chars     |            24.6 |              15.0 |               28.3 |
+| `(String 5-15, u64)`       |            10.4 |              10.6 |               26.1 |
+| `String`, 1 KiB            |           150.0 |              79.4 |               68.8 |
+| `String`, 1 MiB            |          147 µs |             34 µs |              34 µs |
+
 ## Optional Features
 
 ### Size Tracking
@@ -162,6 +205,7 @@ The hasher is built around these core components:
 - `QuickXxh3Hasher`: Buffered one-shot hasher for short inputs, with the same results
 - `QuickXxh3Builder`: `BuildHasher` of `QuickXxh3Hasher`s, for `HashMap` and friends
 - `RandomXxh3Builder`: Randomization capability provider
+- `Xxh3HashMap`, `Xxh3HashSet`, `RandomXxh3HashMap`, `RandomXxh3HashSet`: `HashMap` and `HashSet` with the builders
 - `Xxh3Hashable`: Trait for self-hashing types
 
 The default configuration uses a custom secret generated with `0xDEAD_BEEF_FEED_F00D` as seed for consistent hashing across instances.
