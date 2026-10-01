@@ -137,8 +137,18 @@ enum Xxh3Secret {
 }
 
 impl CustomXxh3Hasher {
-    /// Create a new [CustomXxh3Hasher] with a given seed.
-    pub fn new(seed: u64) -> Self {
+    /// Create a new [CustomXxh3Hasher] with the default seed (0) and our custom secret.
+    #[inline]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /**
+    Create a new [CustomXxh3Hasher] hashing as standard xxh3 with `seed`, so
+    with Xxh3's default secret rather than our custom one. `with_seed(0)` thus
+    equals [CustomXxh3Hasher::new_xxh3_defaults], not [CustomXxh3Hasher::new].
+    */
+    pub fn with_seed(seed: u64) -> Self {
         Self {
             xxh: build_xxh3_with_seed(seed),
             seed,
@@ -205,7 +215,7 @@ impl CustomXxh3Hasher {
         if self.secret().is_some() {
             *self = Self::with_secret_and_seed(self.secret().unwrap(), seed).unwrap();
         } else {
-            *self = Self::new(seed);
+            *self = Self::with_seed(seed);
         }
     }
 
@@ -317,8 +327,8 @@ bytes, which xxh3 can't hash in one pass anyway, spill over into a
 
 For the same input, the hash is identical to that of the default
 [CustomXxh3Hasher], as the one-shot and streaming forms of xxh3 agree.
-With `SEEDED`, made by [QuickXxh3Hasher::new], it is identical to that of
-[CustomXxh3Hasher::new] with the same seed. The mode is a type parameter
+With `SEEDED`, made by [QuickXxh3Hasher::with_seed], it is identical to
+that of [CustomXxh3Hasher::with_seed] with the same seed. The mode is a type parameter
 so that the unused one costs nothing, not even a branch.
 */
 #[derive(Clone)]
@@ -332,10 +342,18 @@ pub struct QuickXxh3Hasher<const SEEDED: bool = false> {
     spill: Option<Box<CustomXxh3Hasher>>,
 }
 
-impl QuickXxh3Hasher<true> {
-    /// Create a new [QuickXxh3Hasher] hashing as [CustomXxh3Hasher::new] with `seed`.
+impl QuickXxh3Hasher {
+    /// Create a new [QuickXxh3Hasher] hashing as the default [CustomXxh3Hasher].
     #[inline]
-    pub fn new(seed: u64) -> Self {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl QuickXxh3Hasher<true> {
+    /// Create a new [QuickXxh3Hasher] hashing as [CustomXxh3Hasher::with_seed] with `seed`.
+    #[inline]
+    pub fn with_seed(seed: u64) -> Self {
         Self::build(seed)
     }
 }
@@ -370,7 +388,7 @@ impl<const SEEDED: bool> QuickXxh3Hasher<SEEDED> {
     #[cold]
     fn spill(&mut self, bytes: &[u8]) {
         let mut hasher: Box<CustomXxh3Hasher> = Box::new(match SEEDED {
-            true => CustomXxh3Hasher::new(self.seed),
+            true => CustomXxh3Hasher::with_seed(self.seed),
             false => CustomXxh3Hasher::default(),
         });
         hasher.write(self.buffered());
@@ -507,8 +525,8 @@ impl<T: Xxh3Hashable> Hash for Xxh3Wrapper<T> {
 
 /**
 Randomized hashing, like std's [RandomState]: each builder draws a random
-seed once, and builds [QuickXxh3Hasher]s hashing as [CustomXxh3Hasher::new]
-with that seed. Unlike SipHash, though, xxh3 is not designed to resist
+seed once, and builds [QuickXxh3Hasher]s hashing as
+[CustomXxh3Hasher::with_seed] with that seed. Unlike SipHash, though, xxh3 is not designed to resist
 collisions crafted by an attacker (HashDoS), seeded or not.
 */
 #[derive(Clone)]
@@ -529,7 +547,7 @@ impl RandomXxh3Builder {
 
     #[inline]
     pub fn build_hasher(&self) -> QuickXxh3Hasher<true> {
-        QuickXxh3Hasher::new(self.seed)
+        QuickXxh3Hasher::with_seed(self.seed)
     }
 }
 
@@ -712,7 +730,7 @@ mod tests {
             let streaming: [u64; 5] = [
                 digest(CustomXxh3Hasher::default(), &input),
                 digest(CustomXxh3Hasher::new_xxh3_defaults(), &input),
-                digest(CustomXxh3Hasher::new(42), &input),
+                digest(CustomXxh3Hasher::with_seed(42), &input),
                 digest(CustomXxh3Hasher::with_secret(&TEST_SECRET).unwrap(), &input),
                 digest(
                     CustomXxh3Hasher::with_secret_and_seed(&TEST_SECRET, 7).unwrap(),
@@ -730,7 +748,7 @@ mod tests {
             let mut quick: QuickXxh3Hasher = QuickXxh3Hasher::default();
             quick.write(&input);
             assert_eq!(quick.finish(), expected[0], "quick, {len} bytes");
-            let mut quick: QuickXxh3Hasher<true> = QuickXxh3Hasher::new(42);
+            let mut quick: QuickXxh3Hasher<true> = QuickXxh3Hasher::with_seed(42);
             quick.write(&input);
             assert_eq!(quick.finish(), expected[2], "seeded quick, {len} bytes");
         }
@@ -787,10 +805,13 @@ mod tests {
                 CustomXxh3Hasher::with_secret(&TEST_SECRET).unwrap(),
                 seeded(&TEST_SECRET),
             ),
-            (CustomXxh3Hasher::new(1), CustomXxh3Hasher::new(5)),
+            (
+                CustomXxh3Hasher::with_seed(1),
+                CustomXxh3Hasher::with_seed(5),
+            ),
             (
                 CustomXxh3Hasher::new_xxh3_defaults(),
-                CustomXxh3Hasher::new(5),
+                CustomXxh3Hasher::with_seed(5),
             ),
         ];
         for (i, (original, expected)) in cases.into_iter().enumerate() {
@@ -818,7 +839,7 @@ mod tests {
     fn test_build_hasher_keeps_config() {
         let configs: [fn() -> CustomXxh3Hasher; 4] = [
             CustomXxh3Hasher::default,
-            || CustomXxh3Hasher::new(42),
+            || CustomXxh3Hasher::with_seed(42),
             || CustomXxh3Hasher::with_secret(&TEST_SECRET).unwrap(),
             || CustomXxh3Hasher::with_secret_and_seed(&TEST_SECRET, 42).unwrap(),
         ];
@@ -850,8 +871,8 @@ mod tests {
         assert_eq!(builder.hash_one(TEST_DATA), builder.hash_one(TEST_DATA));
         assert_eq!(cloned.hash_one(TEST_DATA), builder.hash_one(TEST_DATA));
 
-        // the hashes of CustomXxh3Hasher::new() with the builder's seed
-        let mut expected: CustomXxh3Hasher = CustomXxh3Hasher::new(builder.seed);
+        // the hashes of CustomXxh3Hasher::with_seed() with the builder's seed
+        let mut expected: CustomXxh3Hasher = CustomXxh3Hasher::with_seed(builder.seed);
         TEST_DATA.hash(&mut expected);
         assert_eq!(builder.hash_one(TEST_DATA), expected.finish());
     }
@@ -938,7 +959,11 @@ mod tests {
     #[test]
     fn test_quick_hasher_matches_streaming() {
         check_quick_matches_streaming(QuickXxh3Hasher::default, CustomXxh3Hasher::default);
-        check_quick_matches_streaming(|| QuickXxh3Hasher::new(42), || CustomXxh3Hasher::new(42));
+        check_quick_matches_streaming(QuickXxh3Hasher::new, CustomXxh3Hasher::new);
+        check_quick_matches_streaming(
+            || QuickXxh3Hasher::with_seed(42),
+            || CustomXxh3Hasher::with_seed(42),
+        );
     }
 
     #[test]

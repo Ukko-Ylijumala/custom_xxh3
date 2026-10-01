@@ -47,7 +47,7 @@ let hash = hasher.finish();
 use custom_xxh3::CustomXxh3Hasher;
 use std::hash::Hasher;
 
-let mut hasher = CustomXxh3Hasher::new(12345);
+let mut hasher = CustomXxh3Hasher::with_seed(12345);
 hasher.write(b"Hello, world!");
 let hash = hasher.finish();
 ```
