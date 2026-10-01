@@ -28,6 +28,10 @@ hashes in a single pass, as it processes longer inputs in stripes. The
 buffer is left uninitialized, so its size costs nothing up front.
 */
 const QUICK_BUF_SIZE: usize = 240;
+/// Input size up to which [QuickXxh3Hasher] keeps the input in a register.
+const QUICK_SMALL_SIZE: usize = 16;
+/// Xxh3's own default secret, used with a seed.
+const XXH3_DEFAULT_SECRET: [u8; XXH3_SECRET_SIZE] = const_custom_default_secret(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Xxh3Error {
@@ -320,10 +324,11 @@ impl SizeOf for CustomXxh3Hasher {
 A [Hasher] for hashing one short item at a time, e.g. a digest per element
 of a collection. Setting up a streaming [Xxh3] (as in [CustomXxh3Hasher])
 costs far more than hashing a few bytes, so this hasher collects the input
-in a buffer and hashes it in one go with [hash_bytes]: ~1 ns for a `u64`,
-where setting up a [CustomXxh3Hasher] takes ~15 ns. Inputs longer than 240
-bytes, which xxh3 can't hash in one pass anyway, spill over into a
-[CustomXxh3Hasher].
+and hashes it in one go: ~1 ns for a `u64`, where setting up a
+[CustomXxh3Hasher] takes ~15 ns. Up to 16 bytes, e.g. a short string or a
+few integer fields, it collects them in a register, and up to 240 in a
+buffer, hashed with [hash_bytes]. Longer inputs, which xxh3 can't hash in
+one pass anyway, spill over into a [CustomXxh3Hasher].
 
 For the same input, the hash is identical to that of the default
 [CustomXxh3Hasher], as the one-shot and streaming forms of xxh3 agree.
@@ -333,7 +338,14 @@ so that the unused one costs nothing, not even a branch.
 */
 #[derive(Clone)]
 pub struct QuickXxh3Hasher<const SEEDED: bool = false> {
-    /// The input so far; `buf[..len]` is always initialized.
+    /**
+    The input so far, little-endian, while it is at most 16 bytes long. It
+    is hashed from this register as is: hashing it from `buf` right after
+    writing it there makes the CPU wait for the writes to land in memory,
+    as xxh3's reads straddle them (store-to-load forwarding fails).
+    */
+    small: u128,
+    /// The input so far once longer than 16 bytes, when `buf[..len]` is initialized.
     buf: [MaybeUninit<u8>; QUICK_BUF_SIZE],
     len: usize,
     /// Only used with `SEEDED`.
@@ -370,6 +382,7 @@ impl<const SEEDED: bool> QuickXxh3Hasher<SEEDED> {
         let ptr: *mut Self = hasher.as_mut_ptr();
         // SAFETY: every field but buf is written, and buf may be uninitialized
         unsafe {
+            (&raw mut (*ptr).small).write(0);
             (&raw mut (*ptr).len).write(0);
             (&raw mut (*ptr).seed).write(seed);
             (&raw mut (*ptr).spill).write(None);
@@ -377,11 +390,17 @@ impl<const SEEDED: bool> QuickXxh3Hasher<SEEDED> {
         }
     }
 
-    /// The input written so far, as long as it fits in `buf`.
+    /// The input written so far, once longer than 16 bytes and as long as it fits in `buf`.
     #[inline]
     fn buffered(&self) -> &[u8] {
         // SAFETY: write() initializes buf[..len] before extending len over it
         unsafe { self.buf[..self.len].assume_init_ref() }
+    }
+
+    /// Move the input so far from `small` over to `buf`, as it grows past 16 bytes.
+    #[inline]
+    fn small_to_buf(&mut self) {
+        self.buf[..QUICK_SMALL_SIZE].write_copy_of_slice(&self.small.to_le_bytes());
     }
 
     /// Move the input so far over to a streaming hasher, and continue there.
@@ -391,7 +410,10 @@ impl<const SEEDED: bool> QuickXxh3Hasher<SEEDED> {
             true => CustomXxh3Hasher::with_seed(self.seed),
             false => CustomXxh3Hasher::default(),
         });
-        hasher.write(self.buffered());
+        match self.len <= QUICK_SMALL_SIZE {
+            true => hasher.write(&self.small.to_le_bytes()[..self.len]),
+            false => hasher.write(self.buffered()),
+        }
         hasher.write(bytes);
         self.spill = Some(hasher);
     }
@@ -411,7 +433,16 @@ impl<const SEEDED: bool> Hasher for QuickXxh3Hasher<SEEDED> {
         let end: usize = self.len + bytes.len();
         if let Some(hasher) = &mut self.spill {
             hasher.write(bytes);
+        } else if end <= QUICK_SMALL_SIZE {
+            // bytes are only empty if len may be 16, too far to shift by
+            if !bytes.is_empty() {
+                self.small |= read_small(bytes) << (self.len * 8);
+            }
+            self.len = end;
         } else if end <= QUICK_BUF_SIZE {
+            if self.len > 0 && self.len <= QUICK_SMALL_SIZE {
+                self.small_to_buf();
+            }
             self.buf[self.len..end].write_copy_of_slice(bytes);
             self.len = end;
         } else {
@@ -428,6 +459,10 @@ impl<const SEEDED: bool> Hasher for QuickXxh3Hasher<SEEDED> {
     fn finish(&self) -> u64 {
         match &self.spill {
             Some(hasher) => hasher.finish(),
+            None if self.len <= QUICK_SMALL_SIZE => match SEEDED {
+                true => xxh3_small(self.small, self.len, self.seed, &XXH3_DEFAULT_SECRET),
+                false => xxh3_small(self.small, self.len, 0, &XXH3_SECRET),
+            },
             None if SEEDED => xxh3_64_with_seed(self.buffered(), self.seed),
             None => hash_bytes(self.buffered()),
         }
@@ -449,6 +484,96 @@ impl<const SEEDED: bool> SizeOf for QuickXxh3Hasher<SEEDED> {
                 .add_distinct_allocation();
         }
     }
+}
+
+/* ----- xxh3 of short input, from a register ----- */
+
+/// The little-endian `u64` at `at` in `bytes`.
+#[inline(always)]
+fn le_u64(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+}
+
+/// The little-endian `u32` at `at` in `bytes`, as a `u64`.
+#[inline(always)]
+fn le_u32(bytes: &[u8], at: usize) -> u64 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as u64
+}
+
+/// Read `bytes`, at most 16 of them, into a little-endian `u128`.
+#[inline(always)]
+fn read_small(bytes: &[u8]) -> u128 {
+    let n: usize = bytes.len();
+    if n >= 8 {
+        le_u64(bytes, 0) as u128 | (le_u64(bytes, n - 8) as u128) << ((n - 8) * 8)
+    } else if n >= 4 {
+        le_u32(bytes, 0) as u128 | (le_u32(bytes, n - 4) as u128) << ((n - 4) * 8)
+    } else if n > 0 {
+        bytes[0] as u128
+            | (bytes[n / 2] as u128) << (n / 2 * 8)
+            | (bytes[n - 1] as u128) << ((n - 1) * 8)
+    } else {
+        0
+    }
+}
+
+/**
+xxh3 of the `len` bytes (at most 16) in `small`, computed as xxhash-rust's
+`xxh3_64_0to16()` does from a slice. `seed` and `secret` are as there: 0
+with a custom secret, or a seed with Xxh3's default secret.
+*/
+#[inline(always)]
+fn xxh3_small(small: u128, len: usize, seed: u64, secret: &[u8; XXH3_SECRET_SIZE]) -> u64 {
+    let input32 = |at: usize| -> u64 { (small >> (at * 8)) as u32 as u64 };
+    let input64 = |at: usize| -> u64 { (small >> (at * 8)) as u64 };
+    let secret32 = |at: usize| -> u64 { le_u32(secret, at) };
+    let secret64 = |at: usize| -> u64 { le_u64(secret, at) };
+    if len > 8 {
+        let lo: u64 = input64(0) ^ (secret64(24) ^ secret64(32)).wrapping_add(seed);
+        let hi: u64 = input64(len - 8) ^ (secret64(40) ^ secret64(48)).wrapping_sub(seed);
+        let product: u128 = lo as u128 * hi as u128;
+        let acc: u64 = (len as u64)
+            .wrapping_add(lo.swap_bytes())
+            .wrapping_add(hi)
+            .wrapping_add(product as u64 ^ (product >> 64) as u64);
+        xxh3_avalanche(acc)
+    } else if len >= 4 {
+        let seed: u64 = seed ^ ((seed as u32).swap_bytes() as u64) << 32;
+        let input: u64 = input32(len - 4).wrapping_add(input32(0) << 32);
+        let keyed: u64 = input ^ (secret64(8) ^ secret64(16)).wrapping_sub(seed);
+        xxh3_strong_avalanche(keyed, len as u64)
+    } else if len > 0 {
+        let byte = |at: usize| -> u64 { (small >> (at * 8)) as u8 as u64 };
+        let combo: u64 = byte(0) << 16 | byte(len >> 1) << 24 | byte(len - 1) | (len as u64) << 8;
+        xxh64_avalanche(combo ^ (secret32(0) ^ secret32(4)).wrapping_add(seed))
+    } else {
+        xxh64_avalanche(seed ^ secret64(56) ^ secret64(64))
+    }
+}
+
+#[inline(always)]
+fn xxh3_avalanche(mut value: u64) -> u64 {
+    value ^= value >> 37;
+    value = value.wrapping_mul(0x1656_6791_9E37_79F9);
+    value ^ value >> 32
+}
+
+#[inline(always)]
+fn xxh3_strong_avalanche(mut value: u64, len: u64) -> u64 {
+    value ^= value.rotate_left(49) ^ value.rotate_left(24);
+    value = value.wrapping_mul(0x9FB2_1C65_1E98_DF25);
+    value ^= (value >> 35).wrapping_add(len);
+    value = value.wrapping_mul(0x9FB2_1C65_1E98_DF25);
+    value ^ value >> 28
+}
+
+#[inline(always)]
+fn xxh64_avalanche(mut value: u64) -> u64 {
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    value ^= value >> 29;
+    value = value.wrapping_mul(0x1656_67B1_9E37_79F9);
+    value ^ value >> 32
 }
 
 /**
@@ -932,7 +1057,13 @@ mod tests {
         new_quick: impl Fn() -> QuickXxh3Hasher<SEEDED>,
         new_streaming: impl Fn() -> CustomXxh3Hasher,
     ) {
-        let data: Vec<u8> = test_input(3 * QUICK_BUF_SIZE);
+        // Miri runs this far slower, so it gets lengths only up to just past the buffer
+        let max_len: usize = if cfg!(miri) {
+            QUICK_BUF_SIZE + 32
+        } else {
+            3 * QUICK_BUF_SIZE
+        };
+        let data: Vec<u8> = test_input(max_len);
         for len in 0..data.len() {
             let input: &[u8] = &data[..len];
             let expected: u64 = digest(new_streaming(), input);
@@ -945,14 +1076,19 @@ mod tests {
                 "seeded: {SEEDED}, one write of {len} bytes"
             );
 
-            // several writes, crossing the buffer size at different points
-            let mut quick: QuickXxh3Hasher<SEEDED> = new_quick();
-            input.chunks(13).for_each(|chunk: &[u8]| quick.write(chunk));
-            assert_eq!(
-                quick.finish(),
-                expected,
-                "seeded: {SEEDED}, writes of 13 bytes, {len} in total"
-            );
+            // several writes, combining in the register and crossing its and
+            // the buffer's size at different points
+            for size in [1, 2, 3, 5, 8, 13] {
+                let mut quick: QuickXxh3Hasher<SEEDED> = new_quick();
+                input
+                    .chunks(size)
+                    .for_each(|chunk: &[u8]| quick.write(chunk));
+                assert_eq!(
+                    quick.finish(),
+                    expected,
+                    "seeded: {SEEDED}, writes of {size} bytes, {len} in total"
+                );
+            }
         }
     }
 
